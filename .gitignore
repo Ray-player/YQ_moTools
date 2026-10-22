@@ -1,0 +1,43 @@
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/*
+!build/*.spec
+dist/
+
+# --- 运行产物 ---
+sessions/
+*.npz
+logs/
+*.log
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+.workbuddy/
+.DS_Store
+Thumbs.db
+
+# 临时产物
+.tmp_*
+out/
+
+# 用户保存的谱面（不应入库）
+谱面_*.json
+# tests 根目录下就地保存的曲谱（BGI 名字不固定，只能按目录忽略；
+# tests/data/ 下的固件不在此规则内，仍然入库）
+tests/*.json
+
+# 参考截图（用户提供的游戏截图，体积大且不入库；识别调参时用，缺了不影响运行）
+assets/refTex/
+
+# tests 根目录的截图（用户临时拷进来对照的，固件在 tests/data/ 下不受影响）
+tests/*.png
+tests/*.jpg
+
+# HDR 探针输出（三路 A/B 的 PNG/差异图）
+tools/hdr_probe/hdr_ab/

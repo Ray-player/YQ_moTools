@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yqrec"
+version = "0.1.0"
+description = "YQRec - 原神演奏界面实时识谱器（屏幕区域 → 文本谱）"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "YQRec" }]
+dependencies = [
+  "numpy>=1.26",
+  "opencv-python-headless>=4.9",
+  "dxcam>=0.3.0",
+  "j-hdrcapture>=0.1.0",
+  "windows-capture>=2.0.1",
+  "mss>=9.0",
+  "pygame>=2.5",
+  "PySide6>=6.7",
+  "pyqtgraph>=0.13",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+yqrec = "yqrec.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

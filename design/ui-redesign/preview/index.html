@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YQRec · 扁平简约 UI · 日间/夜间</title>
+<!--
+  YQRec UI 重设计 · 视觉基准
+  --------------------------------
+  这是「设计稿」，不是实现。Qt 里的人怎么写见 docs/04-实施指南.md。
+
+  用法
+    · 顶部「运行态」切换四种真实状态：未标定 / 预览就绪 / 录制中 / 试听中 / 手动点选
+    · 右上「夜间 / 日间」切换主题（与代码里 theme.py 的令牌一一对应）
+    · 下方「组件标本」把每个零件的所有状态摊开，方便逐项比对
+
+  维护约定
+    · 颜色只在 JS 的 TOKENS 里出现一次，通过 CSS 变量下发；改配色只改那一处。
+    · 令牌名必须与 templates/theme.py 完全一致（评审时可直接 diff）。
+-->
+<style>
+  /* ================= 基础排版（不随主题变） ================= */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+    background: var(--page-bg, #0b0d10);
+    color: var(--page-fg, #cfd8e2);
+    padding: 28px 24px 64px;
+    transition: background .2s linear;
+  }
+  .mono { font-family: Consolas, "Cascadia Mono", ui-monospace, monospace; }
+
+  /* ================= 页面头部 ================= */
+  .page-head {
+    max-width: 1280px; margin: 0 auto 24px;
+    display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap;
+  }
+  .page-head h1 {
+    margin: 0; font-size: 20px; font-weight: 600; letter-spacing: .2px;
+    color: var(--page-fg, #e6ecf3);
+  }
+  .page-head .sub {
+    margin: 0; font-size: 12.5px; color: var(--page-dim, #7d8b99); line-height: 1.6;
+  }
+  .spacer { flex: 1 1 auto; }
+
+  /* 分段切换器（页面控件，不属于产品 UI，样式独立） */
+  .seg {
+    display: inline-flex; padding: 3px; gap: 2px; border-radius: 8px;
+    background: var(--seg-bg, #171b21); border: 1px solid var(--seg-line, #262c34);
+  }
+  .seg button {
+    appearance: none; border: 0; background: transparent; cursor: pointer;
+    font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 6px;
+    color: var(--seg-fg, #8b98a6);
+  }
+  .seg button:hover { color: var(--page-fg, #e6ecf3); }
+  .seg button[aria-pressed="true"] {
+    background: var(--seg-on, #2a3644); color: var(--page-fg, #fff);
+    box-shadow: 0 1px 0 rgba(0,0,0,.25) inset;
+  }
+
+  /* ================= 舞台：产品窗口 + 右侧说明 ================= */
+  .stage {
+    max-width: 1280px; margin: 0 auto;
+    display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap;
+  }
+  .stage .note { flex: 1 1 320px; min-width: 300px; max-width: 420px; }
+  .stage .note h3 {
+    margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--page-fg, #e6ecf3);
+  }
+  .stage .note p, .stage .note li {
+    font-size: 12.5px; line-height: 1.75; color: var(--page-dim, #8b98a6); margin: 0 0 8px;
+  }
+  .stage .note ul { padding-left: 18px; margin: 0 0 12px; }
+  .stage .note b { color: var(--page-fg, #cfd8e2); font-weight: 600; }
+  .stage .note code {
+    font-family: Consolas, monospace; font-size: 11.5px;
+    background: var(--seg-bg, #171b21); padding: 1px 5px; border-radius: 4px;
+  }
+
+  /* ================= 产品窗口外壳 ================= */
+  .win {
+    /* position:relative 不能省：编辑浮层是 .win 内的 absolute 子控件，
+       少了它就会以文档根为基准定位 —— 表现就是"气泡跑到窗口左边"。 */
+    position: relative;
+    width: 558px; height: 913px; flex: 0 0 558px;
+    display: flex; flex-direction: column;
+    background: var(--bg-canvas);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px; overflow: hidden;
+    box-shadow: 0 24px 60px -20px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.03);
+    color: var(--text-primary);
+  }
+
+  /* ---------- 工具栏（3 行） ---------- */
+  .toolbar {
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 6px 8px; display: flex; flex-direction: column; gap: 4px;
+    flex: 0 0 auto;
+  }
+  .trow { display: flex; align-items: center; gap: 6px; height: 26px; }
+
+  /* ---------- 通用控件 ---------- */
+  .btn {
+    height: 26px; padding: 0 10px; border-radius: 6px; cursor: default;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    font-size: 12px; white-space: nowrap; border: 1px solid var(--border-default);
+    background: var(--bg-surface); color: var(--text-primary);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  .btn.quiet   { background: transparent; border-color: transparent; color: var(--text-secondary); }
+  .btn.danger  { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); font-weight: 600; }
+  .btn.toggle  { background: transparent; border-color: var(--border-default); color: var(--text-tertiary); padding: 0 8px; }
+  .btn.toggle[aria-pressed="true"] {
+    background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent-text);
+  }
+  /* 注意：示意页里按钮是 <div>，没有原生 disabled 属性 → 用 .dis 类表达禁用。
+     真实 Qt 实现里就是 setEnabled(False)，由 QSS 的 :disabled 接管。 */
+  .btn.dis, .btn[disabled] { color: var(--text-disabled); background: var(--bg-surface); border-color: var(--border-subtle); }
+  .btn.quiet.dis, .btn.quiet[disabled] { background: transparent; border-color: transparent; }
+  .btn.primary.dis, .btn.primary[disabled] { background: var(--bg-surface); border-color: var(--border-subtle); color: var(--text-disabled); font-weight: 400; }
+  .btn.icon { width: 28px; padding: 0; background: transparent; border-color: transparent; color: var(--text-secondary); }
+  .btn.icon:hover { color: var(--text-primary); }
+  /* 触发浮层的按钮：浮层开着时高亮，让"二级页面属于谁"一目了然 */
+  .btn.on { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent-text); }
+  .btn.off { background: var(--bg-surface); border-color: var(--border-subtle); color: var(--text-disabled); }
+  .btn.icon[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent-text); }
+
+  .combo {
+    height: 26px; padding: 0 6px; border-radius: 6px; font-size: 12px;
+    background: var(--bg-surface); border: 1px solid var(--border-default);
+    color: var(--text-primary); display: inline-flex; align-items: center; gap: 6px;
+    justify-content: space-between; white-space: nowrap; overflow: hidden;
+  }
+  .combo.quiet { background: transparent; border-color: var(--border-subtle); color: var(--text-secondary); }
+  .combo .chev {
+    width: 0; height: 0; flex: 0 0 auto;
+    border-left: 3.5px solid transparent; border-right: 3.5px solid transparent;
+    border-top: 4px solid var(--text-tertiary);
+  }
+  .chip {
+    height: 24px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center;
+    background: var(--bg-surface); border: 1px solid var(--border-subtle);
+    color: var(--text-secondary); font-family: Consolas, monospace; font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .chip.empty { background: transparent; border-style: dashed; border-color: var(--border-default); color: var(--text-tertiary); }
+  .grow { flex: 1 1 auto; min-width: 0; }
+
+  .dot { width: 8px; height: 8px; border-radius: 4px; flex: 0 0 auto; }
+  .dot.ok { background: var(--success); }
+  .dot.warn { background: var(--warn); }
+  .dot.off { background: var(--text-tertiary); }
+
+  .slider { flex: 1 1 auto; min-width: 56px; height: 18px; position: relative; }
+  .slider .track { position: absolute; top: 7px; left: 0; right: 0; height: 4px; border-radius: 2px; background: var(--border-subtle); }
+  .slider .fill  { position: absolute; top: 7px; left: 0; width: 74%; height: 4px; border-radius: 2px; background: var(--accent); }
+  .slider .knob  {
+    position: absolute; top: 3px; left: calc(74% - 6px); width: 12px; height: 12px; border-radius: 6px;
+    background: var(--accent); border: 2px solid var(--bg-panel);
+  }
+  .value-chip { min-width: 42px; font-family: Consolas, monospace; font-size: 11px; color: var(--text-primary); }
+
+  /* ---------- 分段控件（检测方式 / 编辑模式） ---------- */
+  .segmented {
+    display: inline-flex; padding: 2px; gap: 2px; height: 26px; border-radius: 6px;
+    background: var(--bg-surface); border: 1px solid var(--border-subtle);
+  }
+  .segmented span {
+    display: inline-flex; align-items: center; padding: 0 8px; border-radius: 4px;
+    font-size: 11px; color: var(--text-tertiary); white-space: nowrap;
+  }
+  .segmented span[aria-pressed="true"] {
+    background: var(--bg-panel); color: var(--text-primary); font-weight: 600;
+  }
+
+  /* ---------- 区块卡 ---------- */
+  .card {
+    background: var(--bg-panel); border: 1px solid var(--border-subtle); border-radius: 8px;
+    display: flex; flex-direction: column; overflow: hidden; flex: 0 0 auto;
+  }
+  .card-head {
+    height: 28px; padding: 0 10px; display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+  }
+  .card-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+  .card-meta  { font-family: Consolas, monospace; font-size: 11px; color: var(--text-tertiary); }
+
+  .split-gap { height: 8px; flex: 0 0 auto; background: var(--bg-canvas); }
+
+  /* ---------- 键位卡 ---------- */
+  .keys { padding: 0 8px 8px; display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .key {
+    height: 64px; border-radius: 6px; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 2px;
+    background: var(--bg-surface); border: 1px solid var(--border-subtle);
+    font-family: Consolas, monospace; overflow: hidden;
+  }
+  .key .k-name { font-size: 11px; font-weight: 600; color: var(--text-primary); white-space: nowrap; }
+  .key .k-rgb  { font-size: 9px; color: var(--text-tertiary); white-space: nowrap; }
+  .key .k-d    { font-size: 9px; color: var(--text-tertiary); }
+  .key .k-d.near { color: var(--warn); }
+  .key.pressed { background: var(--success); border-color: var(--success); }
+  .key.pressed .k-name, .key.pressed .k-rgb, .key.pressed .k-d { color: var(--success-fg); }
+  .key.off { background: transparent; border: 1px dashed var(--border-default); }
+  .key.off .k-name, .key.off .k-rgb, .key.off .k-d { color: var(--text-disabled); }
+
+  /* ---------- 预览区 ---------- */
+  .preview { position: relative; flex: 1 1 auto; margin: 0 8px 8px; border-radius: 6px; overflow: hidden;
+             background: var(--bg-input); min-height: 200px; }
+  /* 伪造的游戏画面（不是截图，纯 CSS 渐变，避免版权问题） */
+  .scene {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(120% 80% at 18% 22%, rgba(255,236,168,.55), transparent 55%),
+      radial-gradient(90% 70% at 78% 30%, rgba(126,214,173,.45), transparent 60%),
+      radial-gradient(120% 90% at 60% 92%, rgba(86,120,79,.85), transparent 70%),
+      linear-gradient(160deg, #2b4a3c 0%, #3f6148 38%, #244033 100%);
+  }
+  .scene::after {
+    content: ""; position: absolute; inset: 0;
+    background-image: radial-gradient(circle at 30% 70%, rgba(255,255,255,.10) 0 2px, transparent 3px),
+                      radial-gradient(circle at 70% 40%, rgba(255,255,255,.08) 0 2px, transparent 3px);
+    background-size: 70px 70px, 110px 110px; opacity: .5;
+  }
+  .prev-header {
+    position: absolute; left: 12px; top: 12px; z-index: 4;
+    padding: 3px 8px; border-radius: 4px; background: rgba(10,14,18,.72);
+    font-family: Consolas, monospace; font-size: 11px; color: rgba(232,240,248,.92);
+  }
+  .prev-state {
+    position: absolute; right: 12px; top: 12px; z-index: 4;
+    font-family: Consolas, monospace; font-size: 11px; color: rgba(232,240,248,.62);
+  }
+  /* 键位圈 */
+  .ring {
+    position: absolute; transform: translate(-50%, -50%);
+    border-radius: 50%; border: 1px solid rgba(255,255,255,.55);
+    display: flex; align-items: center; justify-content: center;
+    font-family: Consolas, monospace; font-size: 10px; color: rgba(220,230,240,.80);
+  }
+  .ring.pressed { border: 1.6px solid rgba(46,212,127,.95); background: rgba(46,212,127,.14); color: rgba(255,255,255,.95); }
+  /* 采样点（8 个等角分布，低存在感） */
+  .ring i {
+    position: absolute; width: 3px; height: 3px; border-radius: 50%;
+    background: rgba(255,120,120,.45); margin: -1.5px 0 0 -1.5px;
+  }
+  .preview.learning .ring i { background: rgba(255,92,92,.95); width: 4px; height: 4px; }
+  .empty-state {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 6px;
+    color: var(--text-tertiary); font-size: 11px; text-align: center;
+  }
+
+  /* ---------- 录制区 ---------- */
+  .record-body { flex: 1 1 auto; display: flex; flex-direction: column; padding: 0 8px 8px; gap: 6px; min-height: 0; }
+  .textbox {
+    flex: 1 1 auto; min-height: 72px; border-radius: 6px; padding: 6px 8px;
+    background: var(--bg-input); border: 1px solid var(--border-default);
+    font-family: Consolas, monospace; font-size: 12px; line-height: 1.5;
+    color: var(--text-primary); overflow: hidden; word-break: break-all;
+  }
+  .textbox.readonly { background: var(--bg-surface); color: var(--text-secondary); }
+  .textbox .hl { background: var(--accent); color: var(--accent-fg); border-radius: 2px; padding: 0 1px; }
+  .textbox .hl.locate { background: var(--accent-soft); color: var(--accent-text); box-shadow: inset 0 0 0 1px var(--accent-border); }
+  .record-actions { display: flex; align-items: center; gap: 6px; height: 26px; flex: 0 0 auto; }
+
+  /* ---------- 试听胶囊 ---------- */
+  .playbar {
+    display: inline-flex; align-items: center; gap: 0; height: 26px; padding: 2px;
+    border-radius: 6px; background: var(--bg-surface); border: 1px solid var(--border-default);
+  }
+  .playbar button {
+    appearance: none; width: 28px; height: 20px; border: 0; background: transparent;
+    cursor: default; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 4px; color: var(--text-primary);
+  }
+  .playbar button[disabled] { color: var(--text-disabled); }
+  .playbar .vline { width: 1px; height: 14px; background: var(--border-subtle); margin: 0 3px; }
+  .playbar .stop { width: auto; padding: 0 8px; font: inherit; font-size: 11px; color: var(--text-secondary); }
+  /* 图标一律内联 SVG：24 网格路径，与 icons.py 同一套几何。
+     （之前用 CSS 渐变 + clip-path 拼三角，浏览器渲染结果不稳定 → 快退/快进看不见） */
+  .ico { display: block; width: 18px; height: 18px; flex: 0 0 auto; }
+  .ico.sm { width: 14px; height: 14px; }
+
+  /* ---------- 状态栏 ---------- */
+  .statusbar {
+    height: 26px; flex: 0 0 auto; background: var(--bg-panel);
+    border-top: 1px solid var(--border-subtle); padding: 0 10px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .backend {
+    height: 16px; padding: 0 6px; border-radius: 4px; display: inline-flex; align-items: center;
+    background: var(--bg-surface); border: 1px solid var(--border-subtle);
+    font-family: Consolas, monospace; font-size: 10px; color: var(--text-secondary);
+  }
+  .backend[data-tone="warn"] { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+  .status-text { font-family: Consolas, monospace; font-size: 11px; color: var(--text-tertiary); }
+  .toast { margin-left: auto; font-size: 11px; color: var(--text-secondary); }
+  .toast[data-tone="warn"]  { color: var(--warn); }
+  .toast[data-tone="error"] { color: var(--danger); }
+
+  /* ---------- 手动点选浮层 ---------- */
+  .edit-panel {
+    position: absolute; width: 144px; z-index: 9;
+    background: var(--bg-elevated); border: 1px solid var(--border-default);
+    border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.28);
+  }
+  .edit-panel .arrow {
+    position: absolute; top: -7px; left: 50%; transform: translateX(-50%);
+    width: 14px; height: 7px; overflow: hidden;
+  }
+  .edit-panel .arrow::before {
+    content: ""; position: absolute; left: 3px; top: 3px; width: 8px; height: 8px;
+    background: var(--bg-elevated); border-left: 1px solid var(--border-default);
+    border-top: 1px solid var(--border-default); transform: rotate(45deg);
+  }
+  .edit-count { text-align: center; font-family: Consolas, monospace; font-size: 11px; color: var(--text-tertiary); }
+  .edit-hint  { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; }
+
+  /* ================= 组件标本区 ================= */
+  .specimens { max-width: 1280px; margin: 40px auto 0; }
+  .specimens h2 {
+    font-size: 15px; font-weight: 600; margin: 0 0 4px; color: var(--page-fg, #e6ecf3);
+  }
+  .specimens .lede { font-size: 12.5px; color: var(--page-dim, #8b98a6); margin: 0 0 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  .panel {
+    background: var(--bg-panel); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 14px;
+  }
+  .panel h4 {
+    margin: 0 0 10px; font-size: 11px; font-weight: 600; letter-spacing: .4px;
+    text-transform: uppercase; color: var(--text-tertiary);
+  }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .row + .row { margin-top: 10px; }
+  .cap { font-size: 11px; color: var(--text-tertiary); width: 100%; margin-top: 2px; }
+
+  /* 框选遮罩标本 */
+  .picker {
+    position: relative; height: 190px; border-radius: 8px; overflow: hidden;
+    background: linear-gradient(160deg, #33513f, #1f3329 60%, #16241d);
+  }
+  .picker .scrim { position: absolute; inset: 0; background: rgba(8,10,14,.50); }
+  .picker .sel {
+    position: absolute; left: 18%; top: 22%; width: 58%; height: 52%;
+    background: rgba(42,102,240,.18); border: 1px solid rgba(90,148,255,1);
+  }
+  .picker .sel b { position: absolute; width: 10px; height: 10px; border: 2px solid rgba(90,148,255,1); }
+  .picker .sel b:nth-child(1) { left: -1px; top: -1px; border-right: 0; border-bottom: 0; }
+  .picker .sel b:nth-child(2) { right: -1px; top: -1px; border-left: 0; border-bottom: 0; }
+  .picker .sel b:nth-child(3) { left: -1px; bottom: -1px; border-right: 0; border-top: 0; }
+  .picker .sel b:nth-child(4) { right: -1px; bottom: -1px; border-left: 0; border-top: 0; }
+  .picker .tag {
+    position: absolute; left: 18%; top: calc(22% - 24px); padding: 3px 8px; border-radius: 4px;
+    background: rgba(10,14,18,.78); color: rgba(232,240,248,.95);
+    font-family: Consolas, monospace; font-size: 11px;
+  }
+  .picker .cross-v { position: absolute; top: 0; bottom: 0; left: 76%; border-left: 1px dashed rgba(255,255,255,.18); }
+  .picker .cross-h { position: absolute; left: 0; right: 0; top: 74%; border-top: 1px dashed rgba(255,255,255,.18); }
+  .picker .hint {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #DCE8F4; font-size: 13px;
+  }
+
+  /* ================= 令牌表 ================= */
+  .tokens { max-width: 1280px; margin: 40px auto 0; }
+  .token-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .token {
+    display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px;
+    border: 1px solid var(--border-subtle); background: var(--bg-panel);
+  }
+  .token .sw { width: 22px; height: 22px; border-radius: 4px; border: 1px solid rgba(128,128,128,.28); flex: 0 0 auto; }
+  .token .nm { font-family: Consolas, monospace; font-size: 11px; color: var(--text-secondary); }
+  .token .hx { margin-left: auto; font-family: Consolas, monospace; font-size: 10.5px; color: var(--text-tertiary); }
+
+  @media (max-width: 980px) {
+    .stage { flex-direction: column-reverse; }
+    .win { flex: 0 0 auto; transform-origin: top left; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page-head">
+  <div>
+    <h1>YQRec · 扁平简约 UI</h1>
+    <p class="sub">窄长条 558×913 · 日间 / 夜间双主题 · 设计稿（非实现）</p>
+  </div>
+  <span class="spacer"></span>
+  <div class="seg" id="state-seg">
+    <button data-state="empty"  aria-pressed="true">未标定</button>
+    <button data-state="ready">预览就绪</button>
+    <button data-state="rec">录制中</button>
+    <button data-state="playing">试听中</button>
+    <button data-state="edit">手动点选</button>
+  </div>
+  <div class="seg" id="theme-seg">
+    <button data-theme="light" aria-pressed="true">日间（默认）</button>
+    <button data-theme="dark">夜间</button>
+  </div>
+</div>
+
+<div class="stage">
+  <!-- ===================== 产品窗口 ===================== -->
+  <div class="win" id="win">
+
+    <!-- 工具栏：3 行 -->
+    <div class="toolbar">
+      <!-- 行 1 · 抓取源 -->
+      <div class="trow">
+        <div class="btn">框选区域</div>
+        <div class="btn toggle" aria-pressed="true">16:9</div>
+        <div class="chip grow" id="region-chip">未选择</div>
+        <div class="combo quiet" style="width:74px"><span id="backend-label">自动</span><span class="chev"></span></div>
+        <div class="btn icon" id="theme-btn" title="切换日间/夜间"></div>
+        <div class="btn icon" aria-pressed="true" title="窗口置顶（已开启）"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor" transform="translate(12 12) rotate(45) scale(0.86) translate(-12 -12)"><rect x="5.2" y="2.4" width="13.6" height="5.2" rx="2.6"/><path d="M8.4 7.6h7.2l-2.2 5.4h-2.8z"/><rect x="10.7" y="12.6" width="2.6" height="9" rx="1.3"/></g></svg></div>
+      </div>
+      <!-- 行 2 · 乐器与标定 -->
+      <div class="trow">
+        <div class="combo grow"><span>风物之诗琴（21 键）</span><span class="chev"></span></div>
+        <div class="dot ok" id="instrument-dot" title="已标定，基线已学"></div>
+        <div class="btn" id="btn-detect">自动检测</div>
+        <div class="btn" id="btn-manual">手动点选</div>
+        <div class="btn quiet" id="btn-reset">重置</div>
+      </div>
+      <!-- 行 3 · 运行（主操作随状态迁移） -->
+      <div class="trow">
+        <div class="btn" id="btn-preview" style="width:80px">开始预览</div>
+        <div class="btn" id="btn-baseline" style="width:76px">学习基线</div>
+        <div class="btn dis" id="btn-record" style="width:76px">录制谱面</div>
+        <div class="combo quiet" style="width:100px"><span id="sample-label">环形（内环）</span><span class="chev"></span></div>
+        <div class="slider" id="slider">
+          <div class="track"></div><div class="fill"></div><div class="knob"></div>
+        </div>
+        <div class="value-chip" id="radius-label">0.80R</div>
+      </div>
+    </div>
+
+    <!-- 键位状态 -->
+    <div class="card" style="height:246px; margin-top:8px">
+      <div class="card-head">
+        <span class="card-title">键位状态</span>
+        <span class="grow"></span>
+        <span class="card-meta" id="keys-meta">7×3 · 21 键</span>
+      </div>
+      <div class="keys" id="keys"></div>
+    </div>
+
+    <div class="split-gap"></div>
+
+    <!-- 预览 -->
+    <div class="card" style="flex:1 1 auto; min-height:230px">
+      <div class="card-head">
+        <span class="card-title">预览</span>
+        <span class="grow"></span>
+        <span class="card-meta" id="preview-meta">已停止</span>
+      </div>
+      <div class="preview" id="preview">
+        <div class="scene"></div>
+        <div class="prev-header" id="prev-header">1069×598 · ×0.52</div>
+        <div class="prev-state" id="prev-state"></div>
+        <div id="rings"></div>
+      </div>
+    </div>
+
+    <div class="split-gap"></div>
+
+    <!-- 录制内容 -->
+    <div class="card" style="height:200px">
+      <div class="card-head">
+        <span class="card-title">录制内容 · tick（毫秒间隔）</span>
+        <span class="grow"></span>
+        <span class="card-meta" id="record-meta">未录制</span>
+      </div>
+      <div class="record-body">
+        <div class="textbox" id="textbox">300<span id="hl">A400F500G600(DGH)</span>700J</div>
+        <div class="record-actions">
+          <div class="combo quiet" style="width:104px"><span>tick（YQRec）</span><span class="chev"></span></div>
+          <div class="btn" id="btn-save">保存</div>
+          <div class="btn" id="btn-open">打开</div>
+          <span class="grow"></span>
+          <div class="btn" id="btn-play"><svg class="ico sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.6 4.6 19.4 12 8.6 19.4Z" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>试听</div>
+          <div class="playbar" id="playbar" style="display:none">
+            <button disabled title="快退"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M11 4.8 3.4 12 11 19.2Z"/><path d="M19.6 4.8 12 12 19.6 19.2Z"/></g></svg></button>
+            <button title="暂停"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor"><rect x="7.4" y="4.8" width="3.4" height="14.4" rx="1.2"/><rect x="13.2" y="4.8" width="3.4" height="14.4" rx="1.2"/></g></svg></button>
+            <button disabled title="快进"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 4.8 20.6 12 13 19.2Z"/><path d="M4.4 4.8 12 12 4.4 19.2Z"/></g></svg></button>
+            <span class="vline"></span>
+            <button class="stop">停止</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 手动点选浮层（仅 edit 态显示） -->
+    <div class="edit-panel" id="edit-panel" style="display:none">
+      <div class="arrow"></div>
+      <div class="segmented" style="width:100%; justify-content:space-between">
+        <span aria-pressed="true">拖动</span><span>新增</span><span>删除</span>
+      </div>
+      <div class="edit-count">当前 18/21</div>
+      <div class="edit-hint">点画面新增检测圈</div>
+      <div class="btn primary" style="width:100%">保存退出</div>
+    </div>
+
+    <!-- 状态栏 -->
+    <div class="statusbar">
+      <span class="backend" id="backend-chip">DXGI</span>
+      <span class="status-text" id="status-text">59.8 fps · 源 59.9 · 单帧 0.6ms · 512 帧</span>
+      <span class="toast" id="toast"></span>
+    </div>
+  </div>
+
+  <!-- ===================== 右侧说明 ===================== -->
+  <div class="note">
+    <h3>这一版改了什么</h3>
+    <ul>
+      <li><b>层级</b>：按钮分四档（主 / 常用 / 工具 / 收尾）。工具栏任意时刻<b>只有一个蓝色实心按钮</b>，且它会随运行态迁移（开始预览 → 录制谱面 → 停止录制）。</li>
+      <li><b>结构</b>：三段变成三张卡（<code>bg-panel</code> + 1px 细边 + 8px 圆角），夜间几乎看不出边框，日间立刻分明。</li>
+      <li><b>减噪</b>：去掉「后端 / 乐器 / 检测 / 半径」四个文字标签、缩短六处按钮文案，挤出的宽度全给了半径滑条。</li>
+      <li><b>键位卡</b>：矮 4px、字号固定 px、Δ 接近阈值时变琥珀 —— 调 Δ 时不用心算。</li>
+      <li><b>试听</b>：四个按钮收成一个胶囊，图标 16→18px。</li>
+      <li><b>状态栏</b>：拆成「后端徽标 + FPS + 次要数值」，一次性提示与错误合并到右侧同一条消息位上。</li>
+      <li><b>二级面板</b>：手动点选浮层<b>贴住触发按钮右下方</b>（右对齐按钮右缘）、箭头指向按钮中心，被触发按钮自身高亮；点画面空白处等同「保存退出」。切到「手动点选」态可看实际位置。</li>
+    </ul>
+    <h3>双主题怎么保证不走样</h3>
+    <ul>
+      <li>一份 QSS 模板 + 两张令牌表。切换只换变量，<b>几何（圆角/间距/字号）同源</b>，所以不会出现"夜里有圆角、日间变直角"。</li>
+      <li>日间不是夜间反色：底色用冷白灰 <code>#F4F6F8</code>（不用纯白），强调色压深一档保证 4.5:1。</li>
+      <li>检测圈 / 采样点 / 按下高亮 <b>不跟主题</b> —— 它们压在游戏画面上，游戏画面亮度与 App 主题无关。</li>
+    </ul>
+    <p style="margin-top:14px">
+      落到代码：<code>docs/04-实施指南.md</code>（10 步、每步可单独出 exe）<br>
+      取色与对比度：<code>docs/02-设计令牌.md</code>
+    </p>
+  </div>
+</div>
+
+<!-- ===================== 组件标本 ===================== -->
+<div class="specimens">
+  <h2>组件标本</h2>
+  <p class="lede">每个零件的全部状态摊开比对；切换主题后逐项确认没有"某一态漏了配色"。</p>
+
+  <div class="grid">
+
+    <!-- 按钮四档 -->
+    <div class="panel">
+      <h4>按钮 · 四档层级</h4>
+      <div class="row">
+        <div class="btn primary">录制谱面</div>
+        <div class="btn">学习基线</div>
+        <div class="btn quiet">重置</div>
+        <div class="btn danger">停止录制</div>
+      </div>
+      <div class="row">
+        <div class="btn primary" disabled>录制谱面</div>
+        <div class="btn" disabled>学习基线</div>
+        <div class="btn quiet" disabled>重置</div>
+        <div class="btn danger" disabled>停止录制</div>
+      </div>
+      <div class="row">
+        <div class="btn danger">停止预览</div>
+        <div class="btn danger">停止录制</div>
+        <span class="cap" style="width:auto;margin:0">录制中两个「停止」并列（靠位置区分）</span>
+      </div>
+      <div class="row">
+        <div class="btn toggle" aria-pressed="true">16:9</div>
+        <div class="btn toggle">16:9</div>
+        <div class="btn icon" aria-pressed="true" title="窗口置顶"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor" transform="translate(12 12) rotate(45) scale(0.86) translate(-12 -12)"><rect x="5.2" y="2.4" width="13.6" height="5.2" rx="2.6"/><path d="M8.4 7.6h7.2l-2.2 5.4h-2.8z"/><rect x="10.7" y="12.6" width="2.6" height="9" rx="1.3"/></g></svg></div>
+        <div class="combo" style="width:110px"><span>dxgi</span><span class="chev"></span></div>
+      </div>
+      <div class="cap">底线：实心 = 推进（accent 蓝），tonal = 收尾（红）。一屏最多一个实心；「停止 X」一律 tonal danger，不实心 —— 否则两块红会盖掉主按钮。</div>
+    </div>
+
+    <!-- 键位卡 -->
+    <div class="panel">
+      <h4>键位卡 · 三态 + 预警</h4>
+      <div class="row" style="gap:6px">
+        <div class="key" style="width:74px"><span class="k-name">+1 · Q</span><span class="k-rgb">247/242/230</span><span class="k-d">Δ4</span></div>
+        <div class="key" style="width:74px"><span class="k-name">+2 · W</span><span class="k-rgb">238/230/214</span><span class="k-d near">Δ24</span></div>
+        <div class="key pressed" style="width:74px"><span class="k-name">+3 · E</span><span class="k-rgb">198/96/72</span><span class="k-d">Δ38</span></div>
+        <div class="key off" style="width:74px"><span class="k-name">+4 · R</span><span class="k-rgb">—/—/—</span><span class="k-d">Δ—</span></div>
+      </div>
+      <div class="cap">左→右：空闲 / 接近阈值（Δ≥60% 变琥珀）/ 按下（整卡反色）/ 未标定（虚线）</div>
+    </div>
+
+    <!-- 试听胶囊 -->
+    <div class="panel">
+      <h4>试听胶囊</h4>
+      <div class="row">
+        <div class="playbar">
+          <button disabled><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M11 4.8 3.4 12 11 19.2Z"/><path d="M19.6 4.8 12 12 19.6 19.2Z"/></g></svg></button>
+          <button><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor"><rect x="7.4" y="4.8" width="3.4" height="14.4" rx="1.2"/><rect x="13.2" y="4.8" width="3.4" height="14.4" rx="1.2"/></g></svg></button>
+          <button disabled><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 4.8 20.6 12 13 19.2Z"/><path d="M4.4 4.8 12 12 4.4 19.2Z"/></g></svg></button>
+          <span class="vline"></span>
+          <button class="stop">停止</button>
+        </div>
+        <span class="cap" style="width:auto; margin:0">播放中（快退/快进禁用）</span>
+      </div>
+      <div class="row">
+        <div class="playbar">
+          <button><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M11 4.8 3.4 12 11 19.2Z"/><path d="M19.6 4.8 12 12 19.6 19.2Z"/></g></svg></button>
+          <button><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.6 4.6 19.4 12 8.6 19.4Z" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>
+          <button><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 4.8 20.6 12 13 19.2Z"/><path d="M4.4 4.8 12 12 4.4 19.2Z"/></g></svg></button>
+          <span class="vline"></span>
+          <button class="stop">停止</button>
+        </div>
+        <span class="cap" style="width:auto; margin:0">暂停中（可前后定位）</span>
+      </div>
+      <div class="cap">图标 18px / 按钮 28×24；播放键与暂停键共用同一位置，不位移。</div>
+    </div>
+
+    <!-- 状态栏 -->
+    <div class="panel">
+      <h4>状态栏 · 三种语气</h4>
+      <div class="row">
+        <span class="backend">DXGI</span>
+        <span class="status-text">59.8 fps · 源 59.9 · 0.6ms · 512 帧</span>
+      </div>
+      <div class="row">
+        <span class="backend" data-tone="warn">GDI 回退</span>
+        <span class="status-text">30.1 fps</span>
+        <span class="toast" data-tone="warn" style="margin-left:auto">后端回退到 GDI</span>
+      </div>
+      <div class="row">
+        <span class="backend">GDI</span>
+        <span class="status-text">等待新帧… · 512 帧</span>
+        <span class="toast" data-tone="error" style="margin-left:auto">读取谱面失败</span>
+      </div>
+      <div class="cap">原实现有两套提示（左下 showMessage + 右下红字），现在统一到右侧一条。</div>
+    </div>
+
+    <!-- 高亮语义 -->
+    <div class="panel">
+      <h4>谱面高亮 · 两种语义</h4>
+      <div class="row" style="gap:10px">
+        <div class="textbox" style="padding:8px; min-height:auto; flex:0 0 auto">300A400<span class="hl">F500G</span>600(DGH)</div>
+        <span class="cap" style="width:auto;margin:0">播放中</span>
+      </div>
+      <div class="row" style="gap:10px">
+        <div class="textbox" style="padding:8px; min-height:auto; flex:0 0 auto">300A400<span class="hl locate">F500G</span>600(DGH)</div>
+        <span class="cap" style="width:auto;margin:0">暂停定位</span>
+      </div>
+      <div class="cap">实心 = 正在出声；淡染 + 描边 = 只是定位，还没播。</div>
+    </div>
+
+    <!-- 框选遮罩 -->
+    <div class="panel">
+      <h4>框选遮罩</h4>
+      <div class="picker">
+        <div class="scrim"></div>
+        <div class="sel"><b></b><b></b><b></b><b></b></div>
+        <div class="tag">1600x900 @ 120,88</div>
+        <div class="cross-v"></div><div class="cross-h"></div>
+      </div>
+      <div class="cap">1px 选区 + 四角 L 标记 + 十字辅助线；尺寸标签有底，压在亮画面上也读得清。</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ===================== 令牌表 ===================== -->
+<div class="tokens">
+  <h2 style="font-size:15px;font-weight:600;margin:0 0 4px;color:var(--page-fg,#e6ecf3)">令牌（当前主题）</h2>
+  <p class="lede" style="font-size:12.5px;color:var(--page-dim,#8b8a96);margin:0 0 18px">
+    与 <code>templates/theme.py</code> 的 <code>THEMES</code> 一一对应；叠加层令牌两主题共用。
+  </p>
+  <div class="token-grid" id="token-grid"></div>
+</div>
+
+<script>
+/* ============================================================
+   1. 令牌（与 templates/theme.py 严格一致）
+   ============================================================ */
+const TOKENS = {
+  dark: {
+    "bg-canvas":"#0E1216", "bg-panel":"#141A20", "bg-surface":"#1B222A",
+    "bg-surface-hover":"#232C35", "bg-surface-active":"#2A343E",
+    "bg-input":"#0B0F13", "bg-elevated":"#1A222B",
+    "border-subtle":"#222B34", "border-default":"#2F3A45", "border-strong":"#3D4A57",
+    "text-primary":"#E3EAF2", "text-secondary":"#9DABBA",
+    "text-tertiary":"#75828F", "text-disabled":"#4C5764",
+    "accent":"#2A66F0", "accent-hover":"#3B76FF", "accent-pressed":"#1E52CC",
+    "accent-fg":"#FFFFFF", "accent-soft":"#16233A",
+    "accent-border":"#4B83F0", "accent-text":"#7FAAFF",
+    "success":"#2ED47F", "success-fg":"#06140C", "success-soft":"#14301F",
+    "danger":"#FF6B6B", "danger-fg":"#1A0808", "danger-soft":"#35191B",
+    "warn":"#F0A93B", "warn-soft":"#35290F"
+  },
+  light: {
+    "bg-canvas":"#F4F6F8", "bg-panel":"#FFFFFF", "bg-surface":"#EFF2F5",
+    "bg-surface-hover":"#E6EAEF", "bg-surface-active":"#DCE2E9",
+    "bg-input":"#FFFFFF", "bg-elevated":"#FFFFFF",
+    "border-subtle":"#E4E9EE", "border-default":"#D3DAE2", "border-strong":"#B9C3CE",
+    "text-primary":"#18202A", "text-secondary":"#5A6675",
+    "text-tertiary":"#67737F", "text-disabled":"#A7B1BC",
+    "accent":"#2563EB", "accent-hover":"#1D4ED8", "accent-pressed":"#1A44B8",
+    "accent-fg":"#FFFFFF", "accent-soft":"#E9F0FE",
+    "accent-border":"#93B4FA", "accent-text":"#1D4ED8",
+    "success":"#17B26A", "success-fg":"#04150C", "success-soft":"#E4F7ED",
+    "danger":"#D92D20", "danger-fg":"#FFFFFF", "danger-soft":"#FDECEA",
+    "warn":"#B45309", "warn-soft":"#FEF3E2"
+  }
+};
+
+/* 页面外壳自身的配色（不属于产品 UI） */
+const PAGE = {
+  dark:  { bg:"#0b0d10", fg:"#dbe4ee", dim:"#7d8b99", segBg:"#171b21", segLine:"#262c34", segFg:"#8b98a6", segOn:"#2a3644" },
+  light: { bg:"#e9ecf0", fg:"#1a222c", dim:"#5f6c7a", segBg:"#ffffff", segLine:"#dbe1e8", segFg:"#6b7784", segOn:"#e8eef6" }
+};
+
+/* 日/夜切换图标（24 网格，与 icons.py 同线宽 1.5） */
+const SUN = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">'
+  + '<g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">'
+  + '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.8v2.1M12 19.1v2.1M2.8 12h2.1M19.1 12h2.1'
+  + 'M5.5 5.5l1.5 1.5M17 17l1.5 1.5M18.5 5.5L17 7M7 17l-1.5 1.5"/></g></svg>';
+const MOON = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">'
+  + '<path d="M20.4 14.6A8.6 8.6 0 0 1 9.4 3.6a8.6 8.6 0 1 0 11 11Z" fill="currentColor"/></svg>';
+
+/* ============================================================
+   2. 应用主题：把令牌写成 CSS 变量（唯一入口）
+   ============================================================ */
+function applyTheme(name) {
+  const root = document.documentElement;
+  root.dataset.theme = name;
+  const t = TOKENS[name], p = PAGE[name];
+  for (const [k, v] of Object.entries(t)) root.style.setProperty("--" + k, v);
+  root.style.setProperty("--page-bg", p.bg);
+  root.style.setProperty("--page-fg", p.fg);
+  root.style.setProperty("--page-dim", p.dim);
+  root.style.setProperty("--seg-bg", p.segBg);
+  root.style.setProperty("--seg-line", p.segLine);
+  root.style.setProperty("--seg-fg", p.segFg);
+  root.style.setProperty("--seg-on", p.segOn);
+
+  document.querySelectorAll("#theme-seg button").forEach(b => {
+    b.setAttribute("aria-pressed", String(b.dataset.theme === name));
+  });
+  /* 图标显示"点一下会切到哪"：当前日间 → 画月亮 */
+  document.getElementById("theme-btn").innerHTML = (name === "light" ? MOON : SUN);
+  document.getElementById("theme-btn").title =
+    name === "light" ? "切换到夜间主题" : "切换到日间主题";
+  renderTokens(name);
+}
+
+/* ============================================================
+   3. 21 键数据（7×3，与游戏键位一致）
+   ============================================================ */
+const KEYS = [
+  ["+1","Q"],["+2","W"],["+3","E"],["+4","R"],["+5","T"],["+6","Y"],["+7","U"],
+  ["1","A"],["2","S"],["3","D"],["4","F"],["5","G"],["6","H"],["7","J"],
+  ["-1","Z"],["-2","X"],["-3","C"],["-4","V"],["-5","B"],["-6","N"],["-7","M"]
+];
+
+/* 真实的基线附近数值，让 RGB/Δ 看起来像在跑 */
+const METRICS = [
+  [247,242,230,4],[246,241,228,5],[238,230,214,24],[247,242,230,3],
+  [245,240,227,6],[247,242,231,2],[246,241,229,5],
+  [246,241,228,4],[247,242,230,3],[244,239,226,7],[246,241,229,5],
+  [247,242,230,2],[245,240,227,6],[247,242,231,3],
+  [246,241,228,5],[247,242,230,4],[245,240,227,8],[247,242,229,3],
+  [246,241,230,5],[247,242,231,2],[246,241,228,4]
+];
+
+const PRESSED_INDEX = [2, 4, 9, 15];        /* 录制态：模拟这 4 个键被按下 */
+const PRESSED_RGB = [198,96,72];
+
+function renderKeys(state) {
+  const box = document.getElementById("keys");
+  const calibrated = state !== "empty";
+  box.innerHTML = "";
+  KEYS.forEach(([note, key], i) => {
+    const pressed = (state === "rec" || state === "playing") && PRESSED_INDEX.includes(i);
+    const el = document.createElement("div");
+    el.className = "key" + (calibrated ? "" : " off") + (pressed ? " pressed" : "");
+    const m = METRICS[i];
+    const rgb = pressed ? PRESSED_RGB : [m[0], m[1], m[2]];
+    const delta = pressed ? 38 : m[3];
+    el.innerHTML =
+      '<span class="k-name">' + note + ' · ' + key + "</span>" +
+      '<span class="k-rgb">' + (calibrated ? rgb.join("/") : "—/—/—") + "</span>" +
+      '<span class="k-d' + (!pressed && delta >= 18 ? " near" : "") + '">Δ' + (calibrated ? delta : "—") + "</span>";
+    box.appendChild(el);
+  });
+  document.getElementById("keys-meta").textContent = calibrated ? "7×3 · 21 键" : "未标定";
+}
+
+/* ============================================================
+   4. 预览叠加层：21 个检测圈 + 每圈 8 个采样点
+   ============================================================ */
+function renderRings(state) {
+  const box = document.getElementById("rings");
+  box.innerHTML = "";
+  if (state === "empty") {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.innerHTML = "<div>尚未开始预览</div><div>先点「框选区域」选择检测范围</div>";
+    box.appendChild(empty);
+    return;
+  }
+  /* 7 列 × 3 行，坐标按百分比，模拟等比缩放后的画面 */
+  const cols = [14, 26.5, 39, 51.5, 64, 76.5, 89];
+  const rows = [26, 50, 74];
+  const radius = 26;                       /* 视觉直径 px（约等于缩放到显示尺寸后的键径） */
+  rows.forEach((y, r) => {
+    cols.forEach((x, c) => {
+      const i = r * 7 + c;
+      const pressed = (state === "rec" || state === "playing") && PRESSED_INDEX.includes(i);
+      const el = document.createElement("div");
+      el.className = "ring" + (pressed ? " pressed" : "");
+      el.style.left = x + "%";
+      el.style.top = y + "%";
+      el.style.width = radius * 2 + "px";
+      el.style.height = radius * 2 + "px";
+      el.textContent = KEYS[i][1];
+      /* 8 个等角采样点 */
+      for (let k = 0; k < 8; k++) {
+        const a = (-90 + k * 45) * Math.PI / 180;
+        const px = radius + Math.cos(a) * radius * 0.8;
+        const py = radius + Math.sin(a) * radius * 0.8;
+        const dot = document.createElement("i");
+        dot.style.left = px + "px";
+        dot.style.top = py + "px";
+        el.appendChild(dot);
+      }
+      box.appendChild(el);
+    });
+  });
+}
+
+/* ============================================================
+   5. 运行态：一次改完所有控件（模拟真实状态机）
+   ============================================================ */
+const STATES = {
+  empty: {
+    region: ["未选择", true], backend: ["自动", "DXGI", ""],
+    dot: "off", preview: "开始预览", previewRole: "", baseline: "学习基线", record: "录制谱面",
+    primary: "preview", recordEnabled: false, playbar: false,
+    previewMeta: "已停止", header: "1069×598 · ×0.52", stateTag: "",
+    recordMeta: "未录制", readonly: false, save: false, open: true,
+    play: false, status: "等待新帧… · 0 帧", toast: ["", ""], hl: "normal", learning: false
+  },
+  ready: {
+    region: ["1600x900 · 屏 1/2", false], backend: ["自动", "DXGI", ""],
+    dot: "ok", preview: "停止预览", previewRole: "danger", baseline: "学习基线", record: "录制谱面",
+    primary: "record", recordEnabled: true, playbar: false,
+    previewMeta: "运行中", header: "1600×900 · ×0.34", stateTag: "",
+    recordMeta: "未录制", readonly: false, save: false, open: true,
+    play: false, status: "59.8 fps · 源 59.9 · 单帧 0.6ms · 512 帧",
+    toast: ["配置已按需重载", "info"], hl: "normal", learning: false
+  },
+  rec: {
+    region: ["1600x900 · 屏 1/2", false], backend: ["自动", "DXGI", ""],
+    dot: "ok", preview: "停止预览", previewRole: "danger", baseline: "学习基线", record: "停止录制",
+    primary: "record-danger", recordEnabled: true, playbar: false,
+    previewMeta: "录制中", header: "1600×900 · ×0.34", stateTag: "REC",
+    recordMeta: "录制中 · 12 个音 · 0:05", readonly: true, save: false, open: false,
+    play: true, status: "59.8 fps · 源 59.9 · 单帧 0.6ms · 512 帧",
+    toast: ["", ""], hl: "normal", learning: false
+  },
+  playing: {
+    region: ["1600x900 · 屏 1/2", false], backend: ["自动", "DXGI", ""],
+    dot: "ok", preview: "开始预览", previewRole: "", baseline: "学习基线", record: "录制谱面",
+    primary: "", recordEnabled: false, playbar: true,   /* 试听中主操作在控制条里 */
+    previewMeta: "已停止", header: "1600×900 · ×0.34", stateTag: "",
+    recordMeta: "已读取 谱面_tick_1021 · 24 个音", readonly: false, save: true, open: true,
+    play: false, status: "—", toast: ["正在试听", "info"], hl: "playing", learning: false
+  },
+  edit: {
+    region: ["1600x900 · 屏 1/2", false], backend: ["自动", "DXGI", ""],
+    dot: "ok", preview: "停止预览", previewRole: "danger", baseline: "学习基线", record: "录制谱面",
+    primary: "record", recordEnabled: true, playbar: false,
+    previewMeta: "运行中", header: "1600×900 · ×0.34 · 编辑 18/21", stateTag: "EDIT",
+    recordMeta: "未录制", readonly: false, save: false, open: true,
+    play: true, status: "59.8 fps · 源 59.9 · 单帧 0.6ms · 512 帧",
+    toast: ["编辑模式：拖圈调位置，点空白处退出", "info"], hl: "normal", learning: true
+  }
+};
+
+/* 累加 offsetLeft/offsetTop 直到指定祖先 —— 比 getBoundingClientRect 稳：
+   不受页面滚动、父级 transform、页面缩放影响。前提是祖先有 position:relative。 */
+function offsetWithin(el, ancestor) {
+  let x = 0, y = 0, node = el;
+  while (node && node !== ancestor) {
+    x += node.offsetLeft;
+    y += node.offsetTop;
+    node = node.offsetParent;
+  }
+  return { x, y };
+}
+
+function setBtn(el, text, role, disabled) {
+  el.textContent = text;
+  el.className = "btn" + (role ? " " + role : "") + (disabled ? " dis" : "");
+  el.disabled = !!disabled;      /* 原生 <button> 有效；<div> 靠上面的 .dis 类 */
+}
+
+function applyState(state) {
+  const s = STATES[state];
+
+  /* 区域胶囊 */
+  const chip = document.getElementById("region-chip");
+  chip.textContent = s.region[0];
+  chip.classList.toggle("empty", s.region[1]);
+
+  /* 后端 */
+  document.getElementById("backend-label").textContent = s.backend[0];
+  const bc = document.getElementById("backend-chip");
+  bc.textContent = s.backend[1];
+  bc.dataset.tone = s.backend[2] || "";
+  if (s.backend[2]) bc.dataset.tone = s.backend[2];
+
+  /* 乐器状态点 */
+  document.getElementById("instrument-dot").className = "dot " + s.dot;
+
+  /* 运行行：主操作随状态迁移 */
+  const pv = document.getElementById("btn-preview");
+  const bl = document.getElementById("btn-baseline");
+  const rc = document.getElementById("btn-record");
+  /* 「停止预览」与「停止录制」同属收尾动作 → 统一 danger（柔和底，不实心） */
+  setBtn(pv, s.preview, s.previewRole || (s.primary === "preview" ? "primary" : ""), false);
+  setBtn(bl, s.baseline, "", state === "empty");
+  setBtn(rc, s.record, s.primary === "record" ? "primary"
+        : s.primary === "record-danger" ? "danger" : "", !s.recordEnabled);
+  /* 录制中：改识别配置的控件整组锁死（沿用现有逻辑） */
+  const lock = state === "rec";
+  ["btn-detect", "btn-manual", "btn-reset"].forEach(id => {
+    document.getElementById(id).classList.toggle("dis", lock);
+  });
+
+  /* 预览 */
+  document.getElementById("preview-meta").textContent = s.previewMeta;
+  document.getElementById("prev-header").textContent = s.header;
+  document.getElementById("prev-state").textContent = s.stateTag;
+  document.getElementById("preview").classList.toggle("learning", s.learning);
+  renderRings(state);
+
+  /* 录制区 */
+  document.getElementById("record-meta").textContent = s.recordMeta;
+  document.getElementById("textbox").classList.toggle("readonly", s.readonly);
+  setBtn(document.getElementById("btn-save"), "保存", "", !s.save);
+  setBtn(document.getElementById("btn-open"), "打开", "", !s.open);
+  const playBtn = document.getElementById("btn-play");
+  playBtn.style.display = s.playbar ? "none" : "";
+  playBtn.classList.toggle("off", !s.play);
+  document.getElementById("playbar").style.display = s.playbar ? "" : "none";
+  const hl = document.getElementById("hl");
+  hl.className = s.hl === "playing" ? "hl" : s.hl === "locate" ? "hl locate" : "";
+
+  /* 状态栏 */
+  document.getElementById("status-text").textContent = s.status;
+  const toast = document.getElementById("toast");
+  toast.textContent = s.toast[0];
+  toast.dataset.tone = s.toast[1] || "";
+
+  /* 浮层：贴「手动点选」按钮右下方，并夹在窗口内（与 _position_edit_panel() 同思路） */
+  const panel = document.getElementById("edit-panel");
+  const manual = document.getElementById("btn-manual");
+  manual.classList.toggle("on", state === "edit");
+  panel.style.display = state === "edit" ? "flex" : "none";
+  if (state === "edit") {
+    const win = document.getElementById("win");
+    const pos = offsetWithin(manual, win);
+    const PW = 144;
+    /* 右对齐按钮右缘 → 窗口变窄时不会被裁掉 */
+    let left = pos.x + manual.offsetWidth - PW;
+    left = Math.max(8, Math.min(left, win.clientWidth - PW - 8));
+    panel.style.left = left + "px";
+    panel.style.top = (pos.y + manual.offsetHeight + 6) + "px";
+    /* 箭头对准按钮水平中心（不是面板中心）*/
+    const arrowX = pos.x + manual.offsetWidth / 2 - left;
+    panel.querySelector(".arrow").style.left =
+      Math.max(14, Math.min(arrowX, PW - 14)) + "px";
+  }
+
+  /* 键位卡 */
+  renderKeys(state);
+
+  document.querySelectorAll("#state-seg button").forEach(b => {
+    b.setAttribute("aria-pressed", String(b.dataset.state === state));
+  });
+}
+
+/* ============================================================
+   6. 令牌表
+   ============================================================ */
+function renderTokens(name) {
+  const grid = document.getElementById("token-grid");
+  const t = TOKENS[name];
+  grid.innerHTML = Object.entries(t).map(([k, v]) =>
+    '<div class="token"><span class="sw" style="background:' + v + '"></span>' +
+    '<span class="nm">' + k + '</span><span class="hx">' + v + "</span></div>"
+  ).join("");
+}
+
+/* ============================================================
+   7. 事件绑定
+   ============================================================ */
+document.querySelectorAll("#state-seg button").forEach(b => {
+  b.addEventListener("click", () => applyState(b.dataset.state));
+});
+document.querySelectorAll("#theme-seg button").forEach(b => {
+  b.addEventListener("click", () => applyTheme(b.dataset.theme));
+});
+/* 窗口里那颗图标按钮也能切主题，方便对比 */
+document.getElementById("theme-btn").addEventListener("click", () => {
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+});
+
+/* 初始化 */
+applyTheme("light");   /* 产品默认日间 */
+applyState("ready");
+</script>
+</body>
+</html>
