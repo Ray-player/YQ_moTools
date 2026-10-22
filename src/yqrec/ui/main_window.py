@@ -26,6 +26,8 @@ from PySide6.QtGui import (
     QKeySequence,
     QPalette,
     QShortcut,
+    QStandardItem,
+    QStandardItemModel,
     QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -193,8 +195,8 @@ class MainWindow(QMainWindow):
         """上次读到的 instruments.json mtime，用来判断开发者是否刚改过配置。"""
         self._radius_timer: QTimer | None = None
         self._radius_writing = False
-        # 默认选中 JSON 里的**第一个**乐器（不是写死某个 id）；profile 里存过则随后覆盖
-        self._spec: InstrumentSpec = next(iter(self._instruments.values()))
+        # 默认选中 JSON 里的**第一个可选**乐器（不是写死某个 id）；profile 里存过则随后覆盖
+        self._spec: InstrumentSpec = self._first_selectable(self._instruments)
         self._grid: KeyGrid | None = None
         self._thresholds: dict[str, KeyThreshold] | None = None
         self._baseline: np.ndarray | None = None
@@ -373,8 +375,7 @@ class MainWindow(QMainWindow):
         self._combo_instrument.setObjectName("Instrument")
         self._combo_instrument.setMinimumWidth(150)
         self._combo_instrument.setFixedHeight(TOOL_BUTTON_HEIGHT)
-        for inst_id, spec in self._instruments.items():
-            self._combo_instrument.addItem(f"{spec.name}（{spec.key_count} 键）", inst_id)
+        self._combo_instrument.setModel(self._build_instrument_model())
         self._combo_instrument.currentIndexChanged.connect(
             lambda _i: self._load_instrument(str(self._combo_instrument.currentData()))
         )
@@ -929,9 +930,86 @@ class MainWindow(QMainWindow):
             self._keys_meta.setText(f"{KEYS_PER_ROW}×{rows} · {self._grid.key_count} 键")
         self._update_instrument_dot()
 
+    # -- 乐器下拉（含"仅预览"项） ------------------------------------------- #
+
+    PREVIEW_ONLY_TIP = "该乐器的识别参数还在标定中，暂时只能预览、不能选中"
+    """灰显项的气泡说明。文案统一走这里，下拉/Tooltip 只有一份真相。"""
+
+    @staticmethod
+    def _instrument_label(spec: InstrumentSpec) -> str:
+        """下拉文字：`名称（N 键）`；没标定完的乐器加后缀「仅预览」。"""
+        label = f"{spec.name}（{spec.key_count} 键）"
+        if spec.preview_only:
+            label += " · 仅预览"
+        return label
+
+    @staticmethod
+    def _first_selectable(instruments: dict[str, InstrumentSpec]) -> InstrumentSpec:
+        """第一个**可选**的乐器（全都是 preview_only 时退回第一个，免得启动就崩）。"""
+        for spec in instruments.values():
+            if not spec.preview_only:
+                return spec
+        return next(iter(instruments.values()))
+
+    def _build_instrument_model(self) -> QStandardItemModel:
+        """构建下拉模型：`preview_only` 的乐器**可见但不可选**（灰显）。
+
+        用显式的 `QStandardItemModel` 而不是 `addItem()`：只有拿到 item 才能改 flags，
+        而"禁用某一项"在 QComboBox 上没有 API，只能动模型的 `ItemIsEnabled`。
+        """
+        model = QStandardItemModel(self._combo_instrument)
+        for inst_id, spec in self._instruments.items():
+            item = QStandardItem(self._instrument_label(spec))
+            item.setData(inst_id, Qt.ItemDataRole.UserRole)
+            if spec.preview_only:
+                item.setFlags(
+                    item.flags()
+                    & ~Qt.ItemFlag.ItemIsEnabled
+                    & ~Qt.ItemFlag.ItemIsSelectable
+                )
+                item.setToolTip(self.PREVIEW_ONLY_TIP)
+            model.appendRow(item)
+        return model
+
+    def _sync_instrument_model(self) -> None:
+        """F5 重读配置后刷新文字与可选中状态（JSON 里改了 `preview_only` 要跟着变）。"""
+        model = self._combo_instrument.model()
+        if not isinstance(model, QStandardItemModel):
+            return
+        for row in range(model.rowCount()):
+            item = model.item(row)
+            spec = self._instruments.get(str(item.data(Qt.ItemDataRole.UserRole) or ""))
+            if spec is None:
+                continue
+            item.setText(self._instrument_label(spec))
+            flags = item.flags()
+            if spec.preview_only:
+                flags &= ~Qt.ItemFlag.ItemIsEnabled
+                flags &= ~Qt.ItemFlag.ItemIsSelectable
+            else:
+                flags |= Qt.ItemFlag.ItemIsEnabled
+                flags |= Qt.ItemFlag.ItemIsSelectable
+            item.setFlags(flags)
+            item.setToolTip(self.PREVIEW_ONLY_TIP if spec.preview_only else "")
+
+    def _select_instrument(self, inst_id: str) -> None:
+        """把下拉切到 `inst_id`，**不触发** `currentIndexChanged`（避免重入 _load_instrument）。"""
+        combo = self._combo_instrument
+        index = combo.findData(inst_id)
+        if index < 0 or combo.currentIndex() == index:
+            return
+        combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+
     def _load_instrument(self, inst_id: str) -> None:
         spec = self._instruments.get(inst_id)
         if spec is None:
+            return
+        if spec.preview_only:
+            # 灰显项正常点不到；这里兜住 profile 恢复 / 读取谱面 / 命令行等程序化切换
+            self._select_instrument(self._spec.id)
+            self._flash_status(f"{spec.name} 的识别参数还在标定中，暂时只能预览")
             return
         if spec.id == self._spec.id and self._grid is None and self._baseline is None:
             # 首次调用：只同步下拉与灯板
@@ -939,11 +1017,7 @@ class MainWindow(QMainWindow):
             self._keys_panel.set_spec(spec)
             self._apply_detection_spec(spec)
             self._refresh_sidebar_meta()
-            index = self._combo_instrument.findData(inst_id)
-            if index >= 0 and self._combo_instrument.currentIndex() != index:
-                self._combo_instrument.blockSignals(True)
-                self._combo_instrument.setCurrentIndex(index)
-                self._combo_instrument.blockSignals(False)
+            self._select_instrument(inst_id)
             return
         self._close_edit_panel()
         self._stop_playback()  # 换乐器 = 采样与键位映射都变了，试听必须停
@@ -953,11 +1027,7 @@ class MainWindow(QMainWindow):
         self._apply_detection_spec(spec)
         self._clear_detection_state()
         self._reset_status_text()
-        index = self._combo_instrument.findData(inst_id)
-        if index >= 0 and self._combo_instrument.currentIndex() != index:
-            self._combo_instrument.blockSignals(True)
-            self._combo_instrument.setCurrentIndex(index)
-            self._combo_instrument.blockSignals(False)
+        self._select_instrument(inst_id)
         self._refresh_action_emphasis()
 
     def _apply_detection_spec(self, spec: InstrumentSpec) -> None:
@@ -1044,6 +1114,7 @@ class MainWindow(QMainWindow):
                 self._keys_panel.set_baseline(
                     self._baseline, self._channel_by_area, self._thresholds
                 )
+        self._sync_instrument_model()  # preview_only 可能在 JSON 里被改过
         self._apply_detection_spec(self._spec)
         self._sync_sampler_options()
         self._sync_radius_slider()
@@ -2202,7 +2273,11 @@ class MainWindow(QMainWindow):
             return
 
         self._stop_playback()
-        if instrument and instrument in self._instruments and instrument != self._spec.id:
+        target = self._instruments.get(instrument) if instrument else None
+        if target is not None and target.preview_only:
+            # 谱面照常显示（谱面文本与乐器无关），但别把乐器切到一个还不可选的状态
+            self._flash_status(f"这份谱面属于 {target.name}（暂时只能预览），未切换乐器")
+        elif instrument and instrument in self._instruments and instrument != self._spec.id:
             index = self._combo_instrument.findData(instrument)
             if index >= 0:
                 self._combo_instrument.setCurrentIndex(index)  # 会切乐器并停预览
@@ -2561,6 +2636,18 @@ class MainWindow(QMainWindow):
         self._suppress_save = True
         try:
             profile_instrument = resolve_instrument_id(profile.instrument)
+            profile_spec = self._instruments.get(profile_instrument)
+            if profile_spec is not None and profile_spec.preview_only:
+                # 档是那个乐器的（基线/阈值/键位都绑在它身上），套到别的乐器上必错 →
+                # 整份跳过，让用户重新框选 + 学基线，而不是给一个"看起来恢复了"的假状态。
+                _log.info(
+                    "标定档对应乐器 %s 目前仅预览（preview_only），本次不恢复标定",
+                    profile_instrument,
+                )
+                self._lbl_record_info.setText(
+                    f"{profile_spec.name} 暂时只能预览，未恢复它的标定；请重新框选并学基线"
+                )
+                return
             if profile_instrument in self._instruments and profile_instrument != self._spec.id:
                 index = self._combo_instrument.findData(profile_instrument)
                 if index >= 0:

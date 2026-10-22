@@ -368,6 +368,7 @@ def load_instruments(path: Path | str | None = None) -> dict[str, InstrumentSpec
                     delta=None if raw.get("delta") is None else _int_or(raw.get("delta"), 40),
                 ),
                 sustain_ms=_parse_sustain_ms(raw, inst_id),
+                preview_only=bool(raw.get("preview_only", False)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             _log.warning("%s: 解析失败（%s），已跳过该乐器", inst_id, exc)

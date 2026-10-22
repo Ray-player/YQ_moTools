@@ -449,6 +449,15 @@ class InstrumentSpec:
     （见 `__post_init__`）——判断"有没有延音"请用 `sustain`，取阈值请用本字段。
     """
 
+    preview_only: bool = False
+    """只在乐器下拉里可见、但**不可选**（`assets/instruments.json` 的乐器级 `preview_only`）。
+
+    "看得见但选不了"：参数还没标定完（识别会误报/漏报）的乐器用它先占位，
+    用户能看到支持哪些乐器，但不会误选进一个认不准的乐器。
+    与"删掉这个乐器"的区别：删掉后旧标定档/旧谱面会打不开、音频资源也失去引用。
+    等实机标定完成后把 JSON 里的 `preview_only` 去掉（或改 false），重启即恢复可选。
+    """
+
     def __post_init__(self) -> None:
         if self.key_count <= 0:
             raise ValueError("key_count 必须为正")

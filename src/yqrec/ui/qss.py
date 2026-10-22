@@ -310,6 +310,12 @@ QComboBox QAbstractItemView::item {
     padding: 0 6px;
     border-radius: 4px;
 }
+/* 灰显项（如"仅预览"的乐器）：必须有明确的前景色差，否则和可选项目长得一样，
+   用户只会觉得"点了没反应"。视图上设了 color，Qt 的默认 disabled 配色不生效。 */
+QComboBox QAbstractItemView::item:disabled {
+    color: {{text-disabled}};
+    background: transparent;
+}
 
 QPlainTextEdit#RecordView {
     background: {{bg-input}};

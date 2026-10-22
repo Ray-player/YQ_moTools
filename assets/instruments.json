@@ -12,6 +12,7 @@
   "_sustain_ms_comment": "乐器级延音阈值（int，毫秒）：0 = 该乐器不会延音；>0 = 按键按下时长达到它才记为延音（例如 300 表示按住 ≥300ms 才写进谱面的 [ms] 后缀）。谐律键琴暂定 300，实机手感不合适直接改本值后按 F5 重读。旧写法 sustain: true/false 仍可读（true → 200ms）。",
   "record_click": 1,
   "_record_click_comment": "录制启动前的输入注入（全局参数，所有乐器一致）：0=不启用；1=把框选区域所在窗口激活为前台后模拟一次空格键（激活失败坚决不发，防止空格误触本程序按钮）；2=在框选区域中心模拟一次鼠标左键点击（光标移过去→按下抬起→恢复光标原位）。均借鉴 BetterGI 前台 SendInput + MAA 前台激活方案（docs/06），发生在开始录帧之前，注入本身不会进谱面。",
+  "_preview_only_comment": "乐器级 preview_only（bool，默认 false）：true = 该乐器在界面的乐器下拉里可见但**不可选**（灰显，仅用于预览支持列表）。给参数还没标定完、选中必定认不准的乐器用；标定完成后删掉本键（或改 false）重启即恢复可选。当前悠可琴(ykq) / 余音(yy) 为 true：双区配色与和弦区判定待实机标定。",
   "instruments": [
     {
       "id": "fwzs",
@@ -542,6 +543,7 @@
       "name": "悠可琴",
       "key_count": 21,
       "sustain_ms": 0,
+      "preview_only": true,
       "button_radius": 45,
       "delta": 20,
       "detection": {
@@ -682,6 +684,7 @@
       "name": "余音",
       "key_count": 21,
       "sustain_ms": 0,
+      "preview_only": true,
       "button_radius": 45,
       "delta": 20,
       "detection": {
