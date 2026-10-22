@@ -512,9 +512,24 @@ def instrument_deltas(path: Path | str | None = None) -> dict[str, int]:
     return {i: s.detection.default_delta for i, s in load_instruments(path).items()}
 
 
+LEGACY_INSTRUMENT_IDS = {"xlyq": "xljq"}
+"""历史 id 别名 → 当前 id。
+
+2026-10-22 用户指出谐律键琴的 id 应为 `xljq`（原 `xlyq` 是笔误）。已改 JSON / 音频目录 /
+文档，但**旧标定档与旧谱面**里可能还写着老 id，读的时候用 `resolve_instrument_id()`
+兜一下即可（下拉里只会出现当前 id，不会多出旧条目）。
+"""
+
+
+def resolve_instrument_id(inst_id: str) -> str:
+    """把旧 id 映射到当前 id（读旧档/旧谱面用；未知 id 原样返回）。"""
+    key = str(inst_id)
+    return LEGACY_INSTRUMENT_IDS.get(key, key)
+
+
 def load_instrument(inst_id: str, path: Path | str | None = None) -> InstrumentSpec:
     instruments = load_instruments(path)
     try:
-        return instruments[inst_id]
+        return instruments[resolve_instrument_id(inst_id)]
     except KeyError as exc:
         raise KeyError(f"未知乐器 {inst_id!r}，可用: {sorted(instruments)}") from exc

@@ -55,7 +55,7 @@ NOTES = [f"+{i}" for i in range(1, 8)] + [str(i) for i in range(1, 8)] + [
 
 IMAGES: list[tuple[str, str, str]] = [
     ("ref_风物之诗琴.png", "fwzs", "calib_ref_fwzs.json"),
-    ("ref_谐律键琴.png", "xlyq", "calib_ref_xlyq.json"),
+    ("ref_谐律键琴.png", "xljq", "calib_ref_xljq.json"),
     ("ref_镜花之琴.png", "jhzq", "calib_ref_jhzq.json"),
     ("ref_老旧的诗琴.png", "ljdsq", "calib_ref_ljdsq.json"),
     ("ref_优可琴.png", "ykq", "calib_ref_ykq.json"),
@@ -360,7 +360,7 @@ def main() -> None:
 
 def report(payload: dict) -> None:
     summary = payload["summary"]
-    insts = ["fwzs", "xlyq", "jhzq", "ljdsq", "ykq", "yy"]
+    insts = ["fwzs", "xljq", "jhzq", "ljdsq", "ykq", "yy"]
     print()
     print(f"{'方法':28s}" + "".join(f"{i:>12s}" for i in insts) + f"{'SNR几何均':>12s}{'最差':>8s}")
     print("-" * 128)

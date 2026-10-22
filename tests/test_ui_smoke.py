@@ -25,7 +25,7 @@ from yqrec.vision.thresholds import thresholds_from_baseline
 def test_thresholds_from_baseline_uses_max_channel_drop() -> None:
     # 显式把判据设成 max_drop（JSON 里现在默认是 weighted，但这条分支仍要保证可用）
     spec = replace(
-        load_instrument("xlyq"), detection=replace(load_instrument("xlyq").detection, metric="max_drop")
+        load_instrument("xljq"), detection=replace(load_instrument("xljq").detection, metric="max_drop")
     )
     baseline = np.zeros((spec.key_count, 3), dtype=np.float32)
     baseline[:, 0] = 200.0
@@ -658,7 +658,7 @@ def test_record_buttons_follow_baseline_and_preview(
 
 def test_thresholds_from_baseline_weighted_is_the_default() -> None:
     """v1.20 默认判据：加权（只算变暗方向）+ 逐通道死区。"""
-    spec = load_instrument("xlyq")
+    spec = load_instrument("xljq")
     baseline = np.zeros((spec.key_count, 3), dtype=np.float32)
     baseline[:, 0] = 200.0
     baseline[:, 1] = 200.0
@@ -680,7 +680,7 @@ def test_thresholds_from_baseline_weighted_is_the_default() -> None:
 
 def test_thresholds_from_baseline_weighted_is_the_default() -> None:
     """v1.20 默认判据：加权（只算变暗方向）+ 逐通道死区。"""
-    spec = load_instrument("xlyq")
+    spec = load_instrument("xljq")
     baseline = np.zeros((spec.key_count, 3), dtype=np.float32)
     baseline[:, 0] = 200.0
     baseline[:, 1] = 200.0

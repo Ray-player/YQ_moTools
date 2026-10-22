@@ -56,8 +56,8 @@ def test_instruments_sustain_ms_is_the_single_source() -> None:
     for inst_id, spec in specs.items():
         assert spec.sustain_ms >= 0, f"{inst_id} 的 sustain_ms 不能为负"
         assert spec.sustain == (spec.sustain_ms > 0), f"{inst_id} 布尔值与阈值不一致"
-    assert specs["xlyq"].sustain_ms > 0, "谐律键琴必须声明延音阈值"
-    assert specs["xlyq"].sustain is True
+    assert specs["xljq"].sustain_ms > 0, "谐律键琴必须声明延音阈值"
+    assert specs["xljq"].sustain is True
     for inst_id in ("fwzs", "jhzq", "ljdsq", "ykq", "yy"):
         assert specs[inst_id].sustain_ms == 0, f"{inst_id} 不该有延音"
 
@@ -67,13 +67,13 @@ def test_legacy_sustain_flag_still_reads(tmp_path) -> None:
     data = json.loads((_assets() / "instruments.json").read_text(encoding="utf-8"))
     for inst in data["instruments"]:
         inst.pop("sustain_ms", None)
-        inst["sustain"] = inst["id"] == "xlyq"
+        inst["sustain"] = inst["id"] == "xljq"
     path = tmp_path / "instruments.json"
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     specs = load_instruments(path)
-    assert specs["xlyq"].sustain_ms == LEGACY_SUSTAIN_MS
-    assert specs["xlyq"].sustain is True
+    assert specs["xljq"].sustain_ms == LEGACY_SUSTAIN_MS
+    assert specs["xljq"].sustain is True
     assert specs["fwzs"].sustain_ms == 0
 
 
@@ -81,7 +81,7 @@ def test_invalid_sustain_ms_falls_back_to_zero(tmp_path) -> None:
     """非整数/负数/超上限 → 0（不延音）+ warning，绝不抛。"""
     data = json.loads((_assets() / "instruments.json").read_text(encoding="utf-8"))
     for inst in data["instruments"]:
-        if inst["id"] == "xlyq":
+        if inst["id"] == "xljq":
             inst["sustain_ms"] = "abc"
         if inst["id"] == "jhzq":
             inst["sustain_ms"] = -5
@@ -91,18 +91,18 @@ def test_invalid_sustain_ms_falls_back_to_zero(tmp_path) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     specs = load_instruments(path)
-    assert specs["xlyq"].sustain_ms == 0
+    assert specs["xljq"].sustain_ms == 0
     assert specs["jhzq"].sustain_ms == 0
     assert specs["ljdsq"].sustain_ms == 0
 
 
-def test_sustain_ms_wins_over_legacy_flag(spec_xlyq: InstrumentSpec) -> None:
+def test_sustain_ms_wins_over_legacy_flag(spec_xljq: InstrumentSpec) -> None:
     """两个字段同时存在时以 `sustain_ms` 为准（旧布尔不能把延音关掉）。"""
     from dataclasses import replace
 
-    spec = replace(spec_xlyq, sustain=False)
+    spec = replace(spec_xljq, sustain=False)
     assert spec.sustain is True, "sustain_ms > 0 时布尔应被归一化为 True"
-    assert spec.sustain_ms == spec_xlyq.sustain_ms
+    assert spec.sustain_ms == spec_xljq.sustain_ms
 
 
 def test_confirm_frames_default_is_two() -> None:
@@ -115,27 +115,27 @@ def test_confirm_frames_default_is_two() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _spec_with_threshold(spec_xlyq: InstrumentSpec, threshold: int) -> InstrumentSpec:
+def _spec_with_threshold(spec_xljq: InstrumentSpec, threshold: int) -> InstrumentSpec:
     from dataclasses import replace
 
-    return replace(spec_xlyq, sustain_ms=threshold)
+    return replace(spec_xljq, sustain_ms=threshold)
 
 
 def _presses(pairs: list[tuple[str, bool, float]]) -> list[PressEvent]:
     return [PressEvent(key=k, down=d, ts=t) for k, d, t in pairs]
 
 
-def test_hold_below_threshold_is_not_sustain(spec_xlyq: InstrumentSpec) -> None:
+def test_hold_below_threshold_is_not_sustain(spec_xljq: InstrumentSpec) -> None:
     """按下 299ms < 阈值 300ms → 不记延音（谱面里不该出现 `[299]`）。"""
-    spec = _spec_with_threshold(spec_xlyq, 300)
+    spec = _spec_with_threshold(spec_xljq, 300)
     events = assemble(_presses([("A", True, 0.0), ("A", False, 0.299)]), spec)
     notes = [e for e in events if isinstance(e, NoteEvent)]
     assert notes and notes[0].sustain_ms == 0.0
 
 
-def test_hold_reaching_threshold_records_full_hold(spec_xlyq: InstrumentSpec) -> None:
+def test_hold_reaching_threshold_records_full_hold(spec_xljq: InstrumentSpec) -> None:
     """达到阈值就按**完整**按住时长记（不是"超出阈值的部分"）。"""
-    spec = _spec_with_threshold(spec_xlyq, 300)
+    spec = _spec_with_threshold(spec_xljq, 300)
     events = assemble(_presses([("A", True, 0.0), ("A", False, 0.8)]), spec)
     notes = [e for e in events if isinstance(e, NoteEvent)]
     assert notes[0].sustain_ms == pytest.approx(800.0, abs=0.1)
@@ -148,9 +148,9 @@ def test_non_sustain_instrument_never_records_sustain(spec_fwzs: InstrumentSpec)
     assert notes[0].sustain_ms == 0.0
 
 
-def test_chord_sustain_takes_max_of_qualifying_keys(spec_xlyq: InstrumentSpec) -> None:
+def test_chord_sustain_takes_max_of_qualifying_keys(spec_xljq: InstrumentSpec) -> None:
     """和弦里只有达到阈值的键参与取最大；没达到的键不把延音拉长/拉短。"""
-    spec = _spec_with_threshold(spec_xlyq, 300)
+    spec = _spec_with_threshold(spec_xljq, 300)
     events = assemble(
         _presses(
             [
@@ -168,9 +168,9 @@ def test_chord_sustain_takes_max_of_qualifying_keys(spec_xlyq: InstrumentSpec) -
     assert notes[0].sustain_ms == pytest.approx(900.0, abs=1.0), "取最长且达阈值的那个键"
 
 
-def test_sustain_does_not_affect_onsets(spec_xlyq: InstrumentSpec) -> None:
+def test_sustain_does_not_affect_onsets(spec_xljq: InstrumentSpec) -> None:
     """延音是"独立于 onset 的 keyUp 时刻"，不该改变 rest/onset 语义。"""
-    spec = _spec_with_threshold(spec_xlyq, 300)
+    spec = _spec_with_threshold(spec_xljq, 300)
     events = assemble(
         _presses(
             [
@@ -275,22 +275,22 @@ def _detector(spec: InstrumentSpec) -> PressDetector:
     return PressDetector(spec, thresholds=thresholds, baseline=baseline)
 
 
-def test_recording_buffer_reports_last_frame_ts(spec_xlyq: InstrumentSpec) -> None:
-    buf = RecordingBuffer(spec_xlyq)
+def test_recording_buffer_reports_last_frame_ts(spec_xljq: InstrumentSpec) -> None:
+    buf = RecordingBuffer(spec_xljq)
     assert buf.last_frame_ts is None
     buf.push_frame(0.5)
     buf.push_frame(0.75)
     assert buf.last_frame_ts == pytest.approx(0.75)
 
 
-def test_stop_while_held_records_elapsed_sustain(spec_xlyq: InstrumentSpec) -> None:
+def test_stop_while_held_records_elapsed_sustain(spec_xljq: InstrumentSpec) -> None:
     """按住不放 → 停止录制：延音 = 到**最后一帧**为止的按下毫秒数。
 
     这里直接模拟 `CaptureWorker.stop_recording()` 的收尾动作
     （`PressDetector.flush(最后一帧时间戳)` + 追加事件 + close），
     不依赖真实采集线程。
     """
-    spec = _spec_with_threshold(spec_xlyq, 300)
+    spec = _spec_with_threshold(spec_xljq, 300)
     buf = RecordingBuffer(spec)
     det = _detector(spec)
 
@@ -310,9 +310,9 @@ def test_stop_while_held_records_elapsed_sustain(spec_xlyq: InstrumentSpec) -> N
     assert "[624]" in recording.tick_text or "[623]" in recording.tick_text
 
 
-def test_short_tap_has_no_sustain_in_text(spec_xlyq: InstrumentSpec) -> None:
+def test_short_tap_has_no_sustain_in_text(spec_xljq: InstrumentSpec) -> None:
     """轻点（< 阈值）录出来的文本没有 `[ms]`。"""
-    spec = _spec_with_threshold(spec_xlyq, 300)
+    spec = _spec_with_threshold(spec_xljq, 300)
     buf = RecordingBuffer(spec)
     det = _detector(spec)
     for index in range(30):
@@ -329,9 +329,9 @@ def test_short_tap_has_no_sustain_in_text(spec_xlyq: InstrumentSpec) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_score_json_marks_sustain_and_restores_it(spec_xlyq: InstrumentSpec) -> None:
+def test_score_json_marks_sustain_and_restores_it(spec_xljq: InstrumentSpec) -> None:
     """`build_record_from_text` → JSON；`score_from_record` 读回来延音还在（文本即真相）。"""
-    record = build_record_from_text("A[800]1000F", spec_xlyq, fps=60.0)
+    record = build_record_from_text("A[800]1000F", spec_xljq, fps=60.0)
     assert record["tick"]["sustain"] is True
     assert record["tick"]["text"] == "A[800]1000F"
 
@@ -340,9 +340,9 @@ def test_score_json_marks_sustain_and_restores_it(spec_xlyq: InstrumentSpec) -> 
     assert [(round(n.onset_ms), n.sustain_ms) for n in notes] == [(0, 800.0), (1000, 0.0)]
 
 
-def test_record_from_recording_carries_sustain(spec_xlyq: InstrumentSpec) -> None:
+def test_record_from_recording_carries_sustain(spec_xljq: InstrumentSpec) -> None:
     """录制结果 → JSON：`tick.sustain` 标记与文本里的 `[ms]` 一致。"""
-    spec = _spec_with_threshold(spec_xlyq, 300)
+    spec = _spec_with_threshold(spec_xljq, 300)
     buf = RecordingBuffer(spec)
     det = _detector(spec)
     for index in range(40):
@@ -376,9 +376,9 @@ def _bgi_events(sheet: dict) -> list[tuple[int, str, str]]:
     return events
 
 
-def test_tick_text_to_bgi_midi_keeps_keyup(spec_xlyq: InstrumentSpec) -> None:
+def test_tick_text_to_bgi_midi_keeps_keyup(spec_xljq: InstrumentSpec) -> None:
     """tick 文本（含延音）→ BGI midi：`UA` 必须正好落在 onset+800ms（1 tick = 1ms）。"""
-    sheet = bgi_sheet.sheet_from_tick("A[800]1000DF", spec_xlyq, sheet_type="midi")
+    sheet = bgi_sheet.sheet_from_tick("A[800]1000DF", spec_xljq, sheet_type="midi")
     events = _bgi_events(sheet)
     assert events[0] == (0, "D", "A")
     assert events[1] == (800, "U", "A"), f"延音被吃掉或算错：{events}"
@@ -391,9 +391,9 @@ def test_tick_text_to_bgi_midi_keeps_keyup(spec_xlyq: InstrumentSpec) -> None:
     assert notes[0].sustain_ms == pytest.approx(800, abs=1)
 
 
-def test_tick_text_to_bgi_yuanqin_keeps_long_hold(spec_xlyq: InstrumentSpec) -> None:
+def test_tick_text_to_bgi_yuanqin_keeps_long_hold(spec_xljq: InstrumentSpec) -> None:
     """`type: yuanqin`：延音乐器的音符时值可以长于 100ms（时值就是延音）。"""
-    sheet = bgi_sheet.sheet_from_tick("A[800]1000DF", spec_xlyq, sheet_type="yuanqin")
+    sheet = bgi_sheet.sheet_from_tick("A[800]1000DF", spec_xljq, sheet_type="yuanqin")
     body = sheet["notes"].replace("|", "")
     assert body.startswith("A[1]"), f"800ms 应写成整音符 A[1]，实际 {body}"
 
@@ -403,12 +403,12 @@ def test_tick_text_to_bgi_yuanqin_keeps_long_hold(spec_xlyq: InstrumentSpec) -> 
     assert notes[1].onset_ms == pytest.approx(1000, abs=1)
 
 
-def test_tick_file_with_sustain_converts_to_bgi(spec_xlyq: InstrumentSpec) -> None:
+def test_tick_file_with_sustain_converts_to_bgi(spec_xljq: InstrumentSpec) -> None:
     """「数字 Tick 谱」文件（`A.800 200 F`）→ BGI：文件格式的延音也要带过去。"""
     # tick 谱里休止数字是"相对上一个音的起点"，所以 A 在 0 按住 800、F 在 200，
     # 形成"低音按住、旋律在上方走"的叠音 —— BGI 事件流本来就允许这样。
     source = tick.TickFormat().parse("A.800 200 F")
-    sheet = bgi_sheet.build_sheet(source, spec_xlyq, name="tick文件")
+    sheet = bgi_sheet.build_sheet(source, spec_xljq, name="tick文件")
     events = _bgi_events(sheet)
     assert (0, "D", "A") in events
     assert (800, "U", "A") in events, f"延音没带到 BGI：{events}"
@@ -439,12 +439,12 @@ def _assets():
 # --------------------------------------------------------------------------- #
 
 
-def test_worker_stop_recording_flushes_held_keys(spec_xlyq: InstrumentSpec) -> None:
+def test_worker_stop_recording_flushes_held_keys(spec_xljq: InstrumentSpec) -> None:
     """`CaptureWorker.stop_recording()` 自己负责补抬：不靠调用方记得 flush。"""
     from yqrec.types import KeyGrid, KeyPoint
     from yqrec.ui.capture_worker import CaptureWorker
 
-    spec = _spec_with_threshold(spec_xlyq, 300)
+    spec = _spec_with_threshold(spec_xljq, 300)
     worker = CaptureWorker()
     worker._spec = spec
     worker._grid = KeyGrid(
@@ -473,12 +473,12 @@ def test_worker_stop_recording_flushes_held_keys(spec_xlyq: InstrumentSpec) -> N
 # --------------------------------------------------------------------------- #
 
 
-def test_hold_while_pressing_other_keys(spec_xlyq: InstrumentSpec) -> None:
+def test_hold_while_pressing_other_keys(spec_xljq: InstrumentSpec) -> None:
     """按住 A 的同时按 D+F：A 的延音要一直算到松手，不能被后续按键打断。
 
     时间线：0ms 按下 A → 304ms 按下 D+F → 1200ms 松 A → 1296ms 松 D+F
     """
-    spec = _spec_with_threshold(spec_xlyq, 300)
+    spec = _spec_with_threshold(spec_xljq, 300)
     buf = RecordingBuffer(spec)
     det = _detector(spec)
 
@@ -504,9 +504,9 @@ def test_hold_while_pressing_other_keys(spec_xlyq: InstrumentSpec) -> None:
     assert recording.tick_text.startswith("A[1200]304DF[")
 
 
-def test_bgi_midi_keeps_overlapping_holds(spec_xlyq: InstrumentSpec) -> None:
+def test_bgi_midi_keeps_overlapping_holds(spec_xljq: InstrumentSpec) -> None:
     """BGI·midi 的 D/U 事件流允许叠音：A 抬起必须在 1200ms，而不是被 D/F 顶掉。"""
-    sheet = bgi_sheet.sheet_from_tick("A[1200]304DF[992]", spec_xlyq, sheet_type="midi")
+    sheet = bgi_sheet.sheet_from_tick("A[1200]304DF[992]", spec_xljq, sheet_type="midi")
     events = _bgi_events(sheet)
     assert (0, "D", "A") in events
     assert (304, "D", "DF") in events
@@ -519,26 +519,26 @@ def test_bgi_midi_keeps_overlapping_holds(spec_xlyq: InstrumentSpec) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_yuanqin_quantizes_long_sustain_to_nearest_value(spec_xlyq: InstrumentSpec) -> None:
+def test_yuanqin_quantizes_long_sustain_to_nearest_value(spec_xljq: InstrumentSpec) -> None:
     """长音时值只能就近取档：750ms 取 800ms（旧实现向下取整会掉到 600）。"""
-    sheet = bgi_sheet.sheet_from_tick("A[750]", spec_xlyq, sheet_type="yuanqin")
+    sheet = bgi_sheet.sheet_from_tick("A[750]", spec_xljq, sheet_type="yuanqin")
     notes = [e for e in bgi_sheet.parse_sheet(sheet).events if isinstance(e, NoteEvent)]
     assert notes[0].sustain_ms == pytest.approx(800, abs=1)
 
 
-def test_yuanqin_reports_overlap_truncation(spec_xlyq: InstrumentSpec) -> None:
+def test_yuanqin_reports_overlap_truncation(spec_xljq: InstrumentSpec) -> None:
     """叠音在 yuanqin 里表达不了：必须能统计出"被截短多少"（供 UI 提示）。"""
     score = bgi_sheet.score_from_tick_text("A[1200]304DF[992]")
-    loss = bgi_sheet.yuanqin_sustain_loss(score, spec_xlyq)
+    loss = bgi_sheet.yuanqin_sustain_loss(score, spec_xljq)
     assert loss.count == 2
     assert loss.max_ms == pytest.approx(900, abs=1), "1200ms 被 304ms 的下一音截断"
     assert bool(loss) is True
 
 
-def test_yuanqin_no_loss_when_note_fits(spec_xlyq: InstrumentSpec) -> None:
+def test_yuanqin_no_loss_when_note_fits(spec_xljq: InstrumentSpec) -> None:
     """延音没被后续音压住时不该报损失（避免假警报）。"""
     score = bgi_sheet.score_from_tick_text("A[800]2000D")
-    assert bgi_sheet.yuanqin_sustain_loss(score, spec_xlyq).count == 0
+    assert bgi_sheet.yuanqin_sustain_loss(score, spec_xljq).count == 0
 
 
 def test_yuanqin_loss_reported_for_non_sustain_instrument(spec_fwzs: InstrumentSpec) -> None:

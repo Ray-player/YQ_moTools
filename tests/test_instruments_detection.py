@@ -5,7 +5,7 @@ v3 起三处配置各有归属：
 - 乐器层级 `delta`：该乐器的灵敏度 Δ（原来藏在 `detection.default_delta`，提升到显眼位置）；
 - `detection` 段：判据（metric/channels）与参考色（refs）。
 
-M2i：`fwzs` 与 `xlyq` 的参考色分家 —— 风物之诗用 1069x598 截图重测（青绿按下），
+M2i：`fwzs` 与 `xljq` 的参考色分家 —— 风物之诗用 1069x598 截图重测（青绿按下），
 谐律键琴保留原先那张 1696x957 的棕盘参数（之前误记成风物之诗）。
 """
 
@@ -19,10 +19,12 @@ import pytest
 
 from yqrec.instruments import (
     instrument_deltas,
+    load_instrument,
     load_instruments,
     load_sampling,
     parse_detection,
     parse_sampling,
+    resolve_instrument_id,
 )
 
 ASSETS = Path(__file__).parents[1] / "assets" / "instruments.json"
@@ -73,14 +75,14 @@ def test_detection_spec_loaded_and_falls_back() -> None:
     # 采样几何不再挂在乐器上（由全局 sampling 段统一管理）
     assert not hasattr(fwzs, "sample_inner_ratio")
 
-    # xlyq（谐律键琴）沿用原先那张棕盘截图（白 247,242,230 → 棕 218,196,155）
-    xlyq = instruments["xlyq"].detection
-    assert xlyq.metric == "weighted"
-    assert xlyq.weights[2] > xlyq.weights[0], "白→棕时 B 跌得最多，B 权重应最大"
-    assert xlyq.unpressed_ref == (247, 242, 230)
-    assert xlyq.pressed_ref == (218, 196, 155)
-    assert instruments["xlyq"].name == "谐律键琴"
-    assert instruments["xlyq"].sustain is True, "谐律键琴有延音"
+    # xljq（谐律键琴）沿用原先那张棕盘截图（白 247,242,230 → 棕 218,196,155）
+    xljq = instruments["xljq"].detection
+    assert xljq.metric == "weighted"
+    assert xljq.weights[2] > xljq.weights[0], "白→棕时 B 跌得最多，B 权重应最大"
+    assert xljq.unpressed_ref == (247, 242, 230)
+    assert xljq.pressed_ref == (218, 196, 155)
+    assert instruments["xljq"].name == "谐律键琴"
+    assert instruments["xljq"].sustain is True, "谐律键琴有延音"
 
     for inst_id, spec in instruments.items():
         detection = spec.detection
@@ -104,24 +106,6 @@ def test_detection_spec_loaded_and_falls_back() -> None:
     assert bogus.metric == "max_drop"
     assert bogus.channels == ("R", "G", "B")
     assert bogus.default_delta == 40, "Δ 越界回落 40"
-
-
-def test_confirm_frames_parsed_and_clamped() -> None:
-    """`detection.confirm_frames`：缺省 2（M4 起至少两帧），合法值透传，越界回落 2。"""
-    assert parse_detection(None, "demo").confirm_frames == 2, "缺段 → 默认两帧确认"
-    assert parse_detection({"confirm_frames": 3}, "demo").confirm_frames == 3
-    assert parse_detection({"confirm_frames": 1}, "demo").confirm_frames == 1, "1 仍是合法值"
-    assert parse_detection({"confirm_frames": 0}, "demo").confirm_frames == 2, "0 越界 → 回落"
-    assert parse_detection({"confirm_frames": 99}, "demo").confirm_frames == 2, "过大 → 回落"
-    assert parse_detection({"confirm_frames": "2"}, "demo").confirm_frames == 2, "字符串数字也吃"
-
-
-def test_every_instrument_declares_confirm_frames() -> None:
-    """真实配置里每个乐器都要显式写出 confirm_frames，方便开发者直接改 JSON 调试。"""
-    data = json.loads(ASSETS.read_text(encoding="utf-8"))
-    for inst in data["instruments"]:
-        assert "confirm_frames" in inst["detection"], f"{inst['id']} 缺 detection.confirm_frames"
-        assert inst["detection"]["confirm_frames"] >= 2, "M4 起默认至少两帧（延音要求）"
 
 
 def test_confirm_frames_parsed_and_clamped() -> None:
@@ -241,3 +225,16 @@ def test_array_format_order_and_legacy_object_compat(tmp_path) -> None:
     legacy_path = tmp_path / "v1.json"
     legacy_path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
     assert list(load_instruments(legacy_path)) == ["zzz", "aaa"]
+
+
+def test_legacy_instrument_id_resolves_to_new_one() -> None:
+    """2026-10-22 谐律键琴 id 由笔误 `xlyq` 更正为 `xljq`：旧档必须还能读。"""
+    assert resolve_instrument_id("xlyq") == "xljq"
+    assert resolve_instrument_id("xljq") == "xljq"
+    assert resolve_instrument_id("nope") == "nope", "未知 id 原样返回，交给上层报错"
+
+    spec = load_instrument("xlyq")  # 旧标定档 / 旧谱面里可能写的是老 id
+    assert spec.id == "xljq"
+    assert spec.name == "谐律键琴"
+
+    assert "xlyq" not in load_instruments(), "旧 id 不能出现在下拉里"

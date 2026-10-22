@@ -115,14 +115,14 @@ def _leaves(sheet: dict) -> str:
 
 
 @pytest.fixture(scope="module")
-def yq(spec_xlyq: InstrumentSpec) -> InstrumentSpec:
-    return spec_xlyq
+def yq(spec_xljq: InstrumentSpec) -> InstrumentSpec:
+    return spec_xljq
 
 
 @pytest.fixture(scope="module")
-def midi(spec_xlyq: InstrumentSpec) -> InstrumentSpec:
+def midi(spec_xljq: InstrumentSpec) -> InstrumentSpec:
     """midi 与乐器无关（都是 1 tick = 1ms），用谐律键琴只是顺手。"""
-    return spec_xlyq
+    return spec_xljq
 
 
 def _score_notes(text: str) -> list[NoteEvent]:

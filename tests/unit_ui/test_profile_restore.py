@@ -16,7 +16,7 @@ import pytest
 def _profile(with_baseline: bool) -> dict:
     profile = {
         "name": "default",
-        "instrument": "xlyq",
+        "instrument": "xljq",
         "backend": "auto",
         "ref_size": [800, 400],
         "created": "2026-10-21T11:00:00",

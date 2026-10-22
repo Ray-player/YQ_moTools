@@ -61,7 +61,7 @@ _BPM_MARK_RE = re.compile(r"^\*(\d+(?:\.\d+)?)$")
 
 BGI_INSTRUMENT_NAMES: dict[str, str] = {
     "fwzs": "风物之诗琴",
-    "xlyq": "谐律键琴",
+    "xljq": "谐律键琴",
     "jhzq": "镜花之琴",
     "ljdsq": "老旧的诗琴",
     "ykq": "悠可琴",

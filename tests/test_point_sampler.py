@@ -198,7 +198,7 @@ def test_parse_detection_reads_weights_and_tolerance() -> None:
 
 def test_detector_uses_per_key_baseline() -> None:
     """两个键颜色差 60：用自己的基线时都不判按下，用区域均值时暗的那个会常亮。"""
-    spec = load_instrument("xlyq")
+    spec = load_instrument("xljq")
     keys = spec.key_order
     baseline = np.full((len(keys), 3), 240.0, dtype=np.float32)
     baseline[0] = (160.0, 160.0, 160.0)  # 第 0 键被角色挡住，本身就暗
@@ -228,7 +228,7 @@ def test_detector_uses_per_key_baseline() -> None:
 
 
 def test_detector_falls_back_when_baseline_shape_is_wrong() -> None:
-    spec = load_instrument("xlyq")
+    spec = load_instrument("xljq")
     thresholds = {
         area.code: KeyThreshold(mode="weighted", base_r=10, base_g=10, base_b=10, delta=1)
         for area in spec.areas
@@ -280,7 +280,7 @@ def test_instruments_json_keeps_all_instruments_after_write(temp_assets: Path) -
     data = json.loads(temp_assets.read_text(encoding="utf-8"))
     assert [i["id"] for i in data["instruments"]] == [
         "fwzs",
-        "xlyq",
+        "xljq",
         "jhzq",
         "ljdsq",
         "ykq",

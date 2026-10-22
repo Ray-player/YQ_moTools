@@ -68,6 +68,7 @@ from ..instruments import (
     load_instruments,
     load_record_click,
     load_sampling,
+    resolve_instrument_id,
     update_sampling,
 )
 from ..logging import get_logger
@@ -2190,7 +2191,9 @@ class MainWindow(QMainWindow):
             else:
                 score = score_from_record(record)
                 text = record_tick_text(record)
-                instrument = str((record.get("instrument") or {}).get("id", ""))
+                instrument = resolve_instrument_id(
+                    str((record.get("instrument") or {}).get("id", ""))
+                )
             if not text.strip():
                 raise ValueError("文件里没有可显示的谱面内容")
         except Exception as exc:
@@ -2557,8 +2560,9 @@ class MainWindow(QMainWindow):
             return
         self._suppress_save = True
         try:
-            if profile.instrument in self._instruments and profile.instrument != self._spec.id:
-                index = self._combo_instrument.findData(profile.instrument)
+            profile_instrument = resolve_instrument_id(profile.instrument)
+            if profile_instrument in self._instruments and profile_instrument != self._spec.id:
+                index = self._combo_instrument.findData(profile_instrument)
                 if index >= 0:
                     self._combo_instrument.setCurrentIndex(index)
             if isinstance(profile.target, ScreenTarget):

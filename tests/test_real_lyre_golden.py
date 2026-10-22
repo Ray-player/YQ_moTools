@@ -1,7 +1,7 @@
-"""Golden 回归：真实游戏截图（原神演奏界面 1696x957）—— **谐律键琴**（`xlyq`）。
+"""Golden 回归：真实游戏截图（原神演奏界面 1696x957）—— **谐律键琴**（`xljq`）。
 
 > M2i 更正：这张图原先被记成风物之诗，用户确认它是**谐律键琴**（棕盘外观）。
-> 其 detection 参数已迁到 `xlyq`，风物之诗改用 `fwzs_1069x598.png`（见
+> 其 detection 参数已迁到 `xljq`，风物之诗改用 `fwzs_1069x598.png`（见
 > `test_real_fwzs_golden.py`）。
 
 这张图是用户在真机上截的，特征是：
@@ -79,7 +79,7 @@ def lyre_frame() -> np.ndarray:
 
 
 def test_color_detector_finds_21_keys(lyre_frame: np.ndarray) -> None:
-    spec = load_instrument("xlyq")
+    spec = load_instrument("xljq")
     circles = detect_keys_color(lyre_frame, spec)
 
     assert len(circles) == spec.key_count, f"检出 {len(circles)} 个，应 {spec.key_count} 个"
@@ -90,7 +90,7 @@ def test_color_detector_finds_21_keys(lyre_frame: np.ndarray) -> None:
 
 
 def test_pressed_keys_match_ground_truth(lyre_frame: np.ndarray) -> None:
-    spec = load_instrument("xlyq")
+    spec = load_instrument("xljq")
     circles = detect_keys_color(lyre_frame, spec)
     assert len(circles) == spec.key_count
 
@@ -128,7 +128,7 @@ def test_square_geometry_still_separates(lyre_frame: np.ndarray) -> None:
     from yqrec.vision.keygrid import keygrid_from_circles
     from yqrec.vision.pointsampler import KeyPointSampler
 
-    spec = load_instrument("xlyq")
+    spec = load_instrument("xljq")
     sampling = load_sampling()
     circles = detect_keys_color(lyre_frame, spec)
     assert len(circles) == spec.key_count

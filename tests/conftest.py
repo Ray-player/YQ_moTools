@@ -25,9 +25,9 @@ def spec_fwzs_single_frame(spec_fwzs):
 
 
 @pytest.fixture(scope="session")
-def spec_xlyq():
+def spec_xljq():
     """谐律键琴（`sustain_ms = 300`）。"""
-    return load_instrument("xlyq")
+    return load_instrument("xljq")
 
 
 @pytest.fixture(scope="session")

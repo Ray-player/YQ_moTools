@@ -64,7 +64,7 @@ def test_key_threshold_and_semantics():
 
 
 def test_instrument_specs_loaded(all_specs):
-    assert set(all_specs) == {"fwzs", "xlyq", "jhzq", "ljdsq", "ykq", "yy"}
+    assert set(all_specs) == {"fwzs", "xljq", "jhzq", "ljdsq", "ykq", "yy"}
     for spec in all_specs.values():
         assert spec.key_count == 21
         assert len(spec.note_to_key) == 21
