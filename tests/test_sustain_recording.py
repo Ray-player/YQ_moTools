@@ -466,3 +466,83 @@ def test_worker_stop_recording_flushes_held_keys(spec_xlyq: InstrumentSpec) -> N
     notes = [n for n in recording.notes if n.keys == ("A",)]
     assert notes and notes[0].sustain_ms == pytest.approx((frames - 1) * FRAME_S * 1000.0, abs=1.0)
     assert worker.recording is False, "收尾后缓冲要摘干净"
+
+
+# --------------------------------------------------------------------------- #
+# 6. 按住一个键的同时按其他键（叠音）
+# --------------------------------------------------------------------------- #
+
+
+def test_hold_while_pressing_other_keys(spec_xlyq: InstrumentSpec) -> None:
+    """按住 A 的同时按 D+F：A 的延音要一直算到松手，不能被后续按键打断。
+
+    时间线：0ms 按下 A → 304ms 按下 D+F → 1200ms 松 A → 1296ms 松 D+F
+    """
+    spec = _spec_with_threshold(spec_xlyq, 300)
+    buf = RecordingBuffer(spec)
+    det = _detector(spec)
+
+    script = [
+        (0.000, {"A"}, True),
+        (0.304, {"D", "F"}, True),
+        (1.200, {"A"}, False),
+        (1.296, {"D", "F"}, False),
+    ]
+    held: set[str] = set()
+    for index in range(90):
+        ts = index * FRAME_S
+        for at, keys, down in script:
+            if abs(ts - at) < FRAME_S / 2:
+                held.update(keys) if down else held.difference_update(keys)
+        buf.push_frame(ts)
+        buf.push_events(det.update(_rgb_pressed("".join(sorted(held))), ts))
+    buf.push_events(det.flush(buf.last_frame_ts))
+    recording = buf.finish()
+
+    notes = [(n.keys, round(n.onset_ms), round(n.sustain_ms)) for n in recording.notes]
+    assert notes == [(("A",), 0, 1200), (("D", "F"), 304, 992)], notes
+    assert recording.tick_text.startswith("A[1200]304DF[")
+
+
+def test_bgi_midi_keeps_overlapping_holds(spec_xlyq: InstrumentSpec) -> None:
+    """BGI·midi 的 D/U 事件流允许叠音：A 抬起必须在 1200ms，而不是被 D/F 顶掉。"""
+    sheet = bgi_sheet.sheet_from_tick("A[1200]304DF[992]", spec_xlyq, sheet_type="midi")
+    events = _bgi_events(sheet)
+    assert (0, "D", "A") in events
+    assert (304, "D", "DF") in events
+    assert (1200, "U", "A") in events, f"叠音被压成单声部了：{events}"
+    assert (1296, "U", "DF") in events
+
+
+# --------------------------------------------------------------------------- #
+# 7. yuanqin 的延音保真度（能表达什么、丢什么）
+# --------------------------------------------------------------------------- #
+
+
+def test_yuanqin_quantizes_long_sustain_to_nearest_value(spec_xlyq: InstrumentSpec) -> None:
+    """长音时值只能就近取档：750ms 取 800ms（旧实现向下取整会掉到 600）。"""
+    sheet = bgi_sheet.sheet_from_tick("A[750]", spec_xlyq, sheet_type="yuanqin")
+    notes = [e for e in bgi_sheet.parse_sheet(sheet).events if isinstance(e, NoteEvent)]
+    assert notes[0].sustain_ms == pytest.approx(800, abs=1)
+
+
+def test_yuanqin_reports_overlap_truncation(spec_xlyq: InstrumentSpec) -> None:
+    """叠音在 yuanqin 里表达不了：必须能统计出"被截短多少"（供 UI 提示）。"""
+    score = bgi_sheet.score_from_tick_text("A[1200]304DF[992]")
+    loss = bgi_sheet.yuanqin_sustain_loss(score, spec_xlyq)
+    assert loss.count == 2
+    assert loss.max_ms == pytest.approx(900, abs=1), "1200ms 被 304ms 的下一音截断"
+    assert bool(loss) is True
+
+
+def test_yuanqin_no_loss_when_note_fits(spec_xlyq: InstrumentSpec) -> None:
+    """延音没被后续音压住时不该报损失（避免假警报）。"""
+    score = bgi_sheet.score_from_tick_text("A[800]2000D")
+    assert bgi_sheet.yuanqin_sustain_loss(score, spec_xlyq).count == 0
+
+
+def test_yuanqin_loss_reported_for_non_sustain_instrument(spec_fwzs: InstrumentSpec) -> None:
+    """把带延音的谱面导到不延音的乐器时，也要报损失（时值上限只有 100ms）。"""
+    score = bgi_sheet.score_from_tick_text("A[800]2000D")
+    loss = bgi_sheet.yuanqin_sustain_loss(score, spec_fwzs)
+    assert loss.count == 1 and loss.max_ms == pytest.approx(700, abs=1)

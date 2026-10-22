@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -353,6 +354,24 @@ def _yq_largest_ms(
     return table[-1]
 
 
+def _yq_nearest_ms(
+    want_ms: float, table: list[tuple[float, str]], upper_ms: float
+) -> tuple[float, str]:
+    """在**不超过 `upper_ms`** 的时值里挑最接近 `want_ms` 的那个。
+
+    延音用的是这个而不是 `_yq_largest_ms`：时值档是 1/1.5/2/3/4… 倍关系，长音附近
+    相邻档差到 200~400ms，一律向下取整会把延音砍掉两成以上（实测 1000ms → 800ms）。
+    取最近档能把误差压到相邻档的一半；同等接近时取**较小**档（宁可早抬，不要晚抬）。
+
+    `upper_ms` 决定"不许越过"的硬边界（下一个音的起点 / 单音上限），
+    因此不会出现"音符比可用跨度还长"导致后续 onset 漂移。
+    """
+    candidates = [(ms, text) for ms, text in table if ms <= upper_ms + 1e-6]
+    if not candidates:
+        return table[-1]
+    return min(candidates, key=lambda item: (abs(item[0] - want_ms), item[0]))
+
+
 def yuanqin_notes_text(
     score: Score,
     spec: InstrumentSpec,
@@ -414,20 +433,22 @@ def yuanqin_notes_text(
             limit = max(max_hold_ms, YQ_MAX_HOLD_MS_SUSTAIN)
         if index + 1 < len(targets):
             span = targets[index + 1] - target
+            hard_upper = span
         else:
+            # 最后一个音：没有"下一个音"约束，跨度只用于"没有延音时填满"，
+            # 取最近档时可以向上靠一档（否则延音只能向下取整，误差更大）
             span = max(max_hold_ms, sustain)
-        # 有显式延音时用它当时值目标（仍不越过下一个音）：staccato 不会被拉长成连奏，
-        # 长按遇到下一个音也会被截断 —— yuanqin 是线性格式，表达不了叠音。
-        hold_target = sustain if sustain > 0 else span
-        cap = min(max(min_note_ms, min(hold_target, span)), limit)
+            hard_upper = max(span, limit)
+        upper = hard_upper
         if index + 1 < len(notes) and set(event.keys) & set(notes[index + 1].keys):
             # 下一个音有共同键：必须留出抬起间隔，且**让中间多出一个 `@` 休止 token** ——
             # BGI 的 `hasCommonChar(本音, 下一 token)` 为真时会扣 30ms 提前抬起再补 60ms，
             # 净效果把节奏拖慢 30ms；中间夹了休止符就不会触发。
-            cap = min(cap, span - MIN_REPRESS_GAP_MS)
-        if cap < smallest_ms:
-            cap = min(max(min_note_ms, span), max_hold_ms)
-        hold_ms, hold_text = _yq_largest_ms(cap, table)
+            upper = max(min_note_ms, span - MIN_REPRESS_GAP_MS)
+        upper = min(upper, limit)
+        # 有显式延音时以它为目标（取最近档）；没有就填满到下一个音（等于旧行为）
+        want = min(sustain if sustain > 0 else span, upper)
+        hold_ms, hold_text = _yq_nearest_ms(max(min_note_ms, want), table, upper)
         emit(f"{_chord_text(keys) if keys else '@'}[{hold_text}]", hold_ms)
         cursor += hold_ms
 
@@ -480,6 +501,64 @@ def build_sheet_typed(
     if kind == "midi":
         return build_midi_sheet(score, spec, name=name, **kwargs)
     raise BgiSheetError(f"未知的 BetterGI 曲谱类型: {sheet_type!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class SustainLoss:
+    """yuanqin 导出时"延音听不出原样"的统计（供 UI 导出后提示）。"""
+
+    count: int = 0
+    max_ms: float = 0.0
+    """单处最大损失（毫秒）。"""
+
+    def __bool__(self) -> bool:
+        return self.count > 0
+
+
+SUSTAIN_LOSS_TOLERANCE_MS = 30.0
+"""损失小于它就当没损失（远小于一个十六分音符，听不出来）。"""
+
+
+def yuanqin_sustain_loss(
+    score: Score, spec: InstrumentSpec, *, bpm: float = YQ_BPM
+) -> SustainLoss:
+    """统计 `type: "yuanqin"` 会损失多少延音（**不修改** `score`）。
+
+    两种损失都来自格式本身，不是 bug：
+
+    1. **叠音**：yuanqin 的 token 是顺序播放的（按下→按够时值→抬起），一个键还按着
+       另一个键就响，表达不了 → 长音被下一个音的起点截断；
+    2. **时值量化**：音符时值只能取 `1 / 1.5 / 2 / 3 / 4 …` 倍的基础符号时长，
+       长音附近相邻档差 200~400ms，只能就近取档。
+
+    导出仍然照做（有损但可听），只是要如实告诉用户"丢了多少、最长多少"。
+    """
+    notes = [e for e in score.events if isinstance(e, NoteEvent)]
+    if not notes:
+        return SustainLoss()
+    table = _yq_ms_table(bpm)
+    limit = YQ_MAX_HOLD_MS if spec.sustain_ms <= 0 else YQ_MAX_HOLD_MS_SUSTAIN
+
+    count = 0
+    worst = 0.0
+    for index, event in enumerate(notes):
+        want = float(event.sustain_ms)
+        if want <= 0:
+            continue
+        if index + 1 < len(notes):
+            span = notes[index + 1].onset_ms - event.onset_ms
+            upper = span
+            if set(event.keys) & set(notes[index + 1].keys):
+                upper = max(1.0, span - MIN_REPRESS_GAP_MS)
+        else:
+            upper = max(YQ_MAX_HOLD_MS, want)
+        upper = min(upper, limit)
+        got, _ = _yq_nearest_ms(max(1.0, min(want, upper)), table, upper)
+        loss = want - got
+        if loss > SUSTAIN_LOSS_TOLERANCE_MS:
+            count += 1
+            worst = max(worst, loss)
+    return SustainLoss(count=count, max_ms=worst)
 
 
 def sheet_from_tick(

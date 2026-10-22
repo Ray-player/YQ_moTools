@@ -2033,6 +2033,7 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        loss = None
         try:
             if sheet_type is None:
                 saved = self._save_tick_json(path, text)
@@ -2045,13 +2046,26 @@ class MainWindow(QMainWindow):
                     name=Path(path).stem,
                     description=f"YQ_moTools · {fmt}",
                 )
+                if sheet_type == "yuanqin":
+                    # yuanqin 是"音符时值"的单声部格式：叠音与超长按都会被截短，
+                    # 保存成功也要把损失说出来（否则用户以为延音带过去了）。
+                    loss = bgi_sheet.yuanqin_sustain_loss(
+                        bgi_sheet.score_from_tick_text(text), self._spec
+                    )
         except Exception as exc:
             _log.exception("保存谱面失败: %s", exc)
             self._set_error(f"保存失败：{exc}")
             return
         self._remember_score_dir(saved.parent)
-        self._flash_status(f"已保存（{fmt}）：{saved}")
         self._lbl_record_info.setText(f"已保存 {fmt} → {saved.name}")
+        if loss is not None and loss.count:
+            self._toast(
+                f"已保存，但 yuanqin 不能叠音：{loss.count} 处延音被截短"
+                f"（最长 {loss.max_ms:.0f}ms）。要完整延音请改存「BGI · midi」",
+                "warn",
+            )
+        else:
+            self._flash_status(f"已保存（{fmt}）：{saved}")
 
     def _save_tick_json(self, path: Path | str, text: str) -> Path:
         """tick 格式落盘：若是本次录制，保留 capture 里的真实采集信息。"""
