@@ -9,6 +9,7 @@
     "square_points": 4,
     "point_patch_ratio": 0.06
   },
+  "_sustain_ms_comment": "乐器级延音阈值（int，毫秒）：0 = 该乐器不会延音；>0 = 按键按下时长达到它才记为延音（例如 300 表示按住 ≥300ms 才写进谱面的 [ms] 后缀）。谐律键琴暂定 300，实机手感不合适直接改本值后按 F5 重读。旧写法 sustain: true/false 仍可读（true → 200ms）。",
   "record_click": 1,
   "_record_click_comment": "录制启动前的输入注入（全局参数，所有乐器一致）：0=不启用；1=把框选区域所在窗口激活为前台后模拟一次空格键（激活失败坚决不发，防止空格误触本程序按钮）；2=在框选区域中心模拟一次鼠标左键点击（光标移过去→按下抬起→恢复光标原位）。均借鉴 BetterGI 前台 SendInput + MAA 前台激活方案（docs/06），发生在开始录帧之前，注入本身不会进谱面。",
   "instruments": [
@@ -16,7 +17,7 @@
       "id": "fwzs",
       "name": "风物之诗琴",
       "key_count": 21,
-      "sustain": false,
+      "sustain_ms": 0,
       "button_radius": 54,
       "delta": 20,
       "detection": {
@@ -38,7 +39,7 @@
         ],
         "note": "米白盘→青绿盘：按下时只有 R 明显下降（G 升高），故用 chroma 判据『绿相对红变强』。采样几何由全局 sampling 段决定（默认环形 0.55R~0.98R）：键帽中心的音符图标按下时几乎不变，只会稀释信号；排除它以后，同一乐器在红叶树背景信号 80、金黄花海背景信号 55，未按下干扰都只有 2（信噪比 27~55 倍；整块方形只有 4~12 倍）。refs 为环形口径实测：未按下 246,242,231 → 按下 163,228,206。delta=30 约为最小信号(55)的 1.8 倍，想更灵敏可降到 20（干扰仍在 2 左右）。｜v1.20 判据改 weighted（点采样 + 三通道加权 + 死区）：权重由 refs 跌幅 (83,14,25) 归一化，对 G/B 下降更敏感（米白→青绿）；死区 8 吃掉各键基准色偏差。",
         "tolerance": 8,
-        "confirm_frames": 1,
+        "confirm_frames": 2,
         "weights": [
           0.68,
           0.115,
@@ -147,7 +148,7 @@
       "id": "xlyq",
       "name": "谐律键琴",
       "key_count": 21,
-      "sustain": true,
+      "sustain_ms": 300,
       "button_radius": 54,
       "delta": 20,
       "detection": {
@@ -169,7 +170,7 @@
         ],
         "note": "白盘→棕盘（R -29 / G -46 / B -75，B 通道跌幅最大），故用 max_drop。ref 为盘面色（圆环中位数），来自 1696x957 演奏视频 —— 这张参考图原本被记成 fwzs，M2i 确认它是谐律键琴。delta=40 是按整块方形口径标定的；改全局 sampling 后建议先「学习基线」再微调本值。延音录制尚未实现。｜v1.20 判据改 weighted（点采样 + 三通道加权 + 死区）：权重由 refs 跌幅 (29,46,75) 归一化，B 通道最重（白→棕）。",
         "tolerance": 8,
-        "confirm_frames": 1,
+        "confirm_frames": 2,
         "weights": [
           0.193,
           0.307,
@@ -278,7 +279,7 @@
       "id": "jhzq",
       "name": "镜花之琴",
       "key_count": 21,
-      "sustain": false,
+      "sustain_ms": 0,
       "button_radius": 47,
       "delta": 20,
       "detection": {
@@ -292,7 +293,7 @@
         "pressed_ref": null,
         "note": "待实机实测后回填 delta 与 refs（本值仅占位）｜v1.20 判据改 weighted（点采样 + 三通道加权 + 死区）：权重取 refTex 参考图实测色 (247,242,231 → 215,195,158) 归一化；refs 尚未回填。",
         "tolerance": 8,
-        "confirm_frames": 1,
+        "confirm_frames": 2,
         "weights": [
           0.211,
           0.309,
@@ -401,7 +402,7 @@
       "id": "ljdsq",
       "name": "老旧的诗琴",
       "key_count": 21,
-      "sustain": false,
+      "sustain_ms": 0,
       "button_radius": 47,
       "delta": 20,
       "detection": {
@@ -415,7 +416,7 @@
         "pressed_ref": null,
         "note": "待实机实测后回填 delta 与 refs（本值仅占位）｜v1.20 判据改 weighted（点采样 + 三通道加权 + 死区）：权重取 refTex 参考图实测色 (245,240,228 → 184,212,160) 归一化；refs 尚未回填。",
         "tolerance": 8,
-        "confirm_frames": 1,
+        "confirm_frames": 2,
         "weights": [
           0.388,
           0.178,
@@ -524,7 +525,7 @@
       "id": "ykq",
       "name": "悠可琴",
       "key_count": 21,
-      "sustain": false,
+      "sustain_ms": 0,
       "button_radius": 45,
       "delta": 20,
       "detection": {
@@ -538,7 +539,7 @@
         "pressed_ref": null,
         "note": "待实机实测后回填 delta 与 refs（本值仅占位）｜v1.20 判据改 weighted（点采样 + 三通道加权 + 死区）：权重取 refTex 参考图实测（按下变深蓝）归一化；chord 区盘色各异，待实机再调。",
         "tolerance": 8,
-        "confirm_frames": 1,
+        "confirm_frames": 2,
         "weights": [
           0.45,
           0.35,
@@ -664,7 +665,7 @@
       "id": "yy",
       "name": "余音",
       "key_count": 21,
-      "sustain": false,
+      "sustain_ms": 0,
       "button_radius": 45,
       "delta": 20,
       "detection": {
@@ -678,7 +679,7 @@
         "pressed_ref": null,
         "note": "待实机实测后回填 delta 与 refs（本值仅占位）｜v1.20 判据改 weighted（点采样 + 三通道加权 + 死区）：权重取 refTex 参考图实测（按下变深紫）归一化；chord 区盘色各异，待实机再调。",
         "tolerance": 8,
-        "confirm_frames": 1,
+        "confirm_frames": 2,
         "weights": [
           0.42,
           0.4,

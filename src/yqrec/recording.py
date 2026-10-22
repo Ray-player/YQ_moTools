@@ -18,10 +18,17 @@ tick 文本以**毫秒间隔**为单位（`A1000F` = 按下 A，隔 1000ms 再�
 from __future__ import annotations
 
 import bisect
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from .timeline.assembler import AssembleConfig, assemble
-from .types import InstrumentSpec, NoteEvent, PressEvent, Score
+from .types import (
+    SUSTAIN_TEXT_MIN_MS,
+    InstrumentSpec,
+    NoteEvent,
+    PressEvent,
+    Score,
+)
 
 _EPS = 1e-6
 """帧时间戳比较容差（秒）：事件 ts 与帧 ts 同源，只需挡住浮点抖动。"""
@@ -61,6 +68,9 @@ class Recording:
 def tick_text(notes: tuple[RecordedNote, ...] | list[RecordedNote]) -> str:
     """渲染成 `A1000F` 形式的文本：和弦字母连写，和弦之间写**毫秒**间隔。
 
+    延音写成和弦后缀 `[ms]`（如 `A[800]1000F` = A 按住 800ms，之后 1000ms 再按 F）；
+    小于 `SUSTAIN_TEXT_MIN_MS`(50ms) 的延音不写（与 01 §7.1 对齐）。
+
     首和弦若带前导静默（`gap_ms > 0`，一般只出现在转换外部谱面时）也会写出数字，
     这样文本是时间轴的完整表示，还原时不会把开头的休止吃掉。
     """
@@ -68,8 +78,17 @@ def tick_text(notes: tuple[RecordedNote, ...] | list[RecordedNote]) -> str:
     for note in notes:
         if note.gap_ms > 0:
             parts.append(str(note.gap_ms))
-        parts.append("".join(note.keys))
+        parts.append(_render_chord(note.keys, note.sustain_ms))
     return "".join(parts)
+
+
+def _render_chord(keys: tuple[str, ...], sustain_ms: float) -> str:
+    """`("A",) + 800` → `"A[800]"`；延音不到 50ms 时只有字母。"""
+    token = "".join(keys)
+    value = int(round(float(sustain_ms)))
+    if value >= SUSTAIN_TEXT_MIN_MS:
+        token += f"[{value}]"
+    return token
 
 
 def _frame_index(frames: list[float], ts: float) -> int:
@@ -86,10 +105,12 @@ class TickNote:
 
     `gap` 的单位由调用方决定：新录制是**毫秒**（`tick.unit == "ms"`），
     旧文件是帧数（`unit == "frame"`，需按采集 fps 换算）。
+    `sustain_ms` 是紧跟和弦的 `[ms]` 后缀（0 = 没写延音）。
     """
 
     keys: tuple[str, ...]
     gap: int
+    sustain_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +122,8 @@ class TickToken:
     start: int
     end: int
     """`text[start:end]` 正好是该和弦的字母，不含后面的间隔数字。"""
+    sustain_ms: float = 0.0
+    """和弦后缀 `[ms]` 的值；`end` 仍只覆盖字母（高亮/诊断不受后缀影响）。"""
 
 
 def scan_tick_tokens(text: str) -> list[TickToken]:
@@ -108,6 +131,7 @@ def scan_tick_tokens(text: str) -> list[TickToken]:
 
     语法（与写入端严格对称）：
     - 连续字母 = 一个和弦（首尾同键去重）；
+    - 和弦后可跟 `[ms]` = 该和弦的**延音**（毫秒，`A[800]`）；方括号内非数字时忽略；
     - 连续数字 = 与**前一个**和弦的间隔（默认毫秒）；
     - 空白、其它字符忽略（容错，不清空已解析结果）。
 
@@ -124,8 +148,16 @@ def scan_tick_tokens(text: str) -> list[TickToken]:
             while index < length and text[index].isalpha():
                 index += 1
             keys = tuple(dict.fromkeys(text[start:index].upper()))
+            end = index
+            sustain, index = _read_sustain(text, index)
             tokens.append(
-                TickToken(keys=keys, gap=pending_gap, start=start, end=index)
+                TickToken(
+                    keys=keys,
+                    gap=pending_gap,
+                    start=start,
+                    end=end,
+                    sustain_ms=sustain,
+                )
             )
             pending_gap = 0
         elif char.isdigit():
@@ -138,9 +170,35 @@ def scan_tick_tokens(text: str) -> list[TickToken]:
     return tokens
 
 
+def _read_sustain(text: str, index: int) -> tuple[float, int]:
+    """从 `index` 起尝试读 `[ms]`，返回 `(延音毫秒, 新的 index)`。
+
+    容错三条：
+    - 允许字母与 `[` 之间有空白；
+    - 方括号里不是正整数 → 延音按 0，但**整段吃掉**（否则里面的字母会被当成和弦，
+      例如 `A[abc]F` 会多出一个 ABC 和弦）；
+    - 没有闭合的 `]` → 原样返回，让外层按普通字符处理（不吞后面的内容）。
+    """
+    length = len(text)
+    probe = index
+    while probe < length and text[probe].isspace():
+        probe += 1
+    if probe >= length or text[probe] != "[":
+        return 0.0, index
+    close = text.find("]", probe + 1)
+    if close < 0:
+        return 0.0, index
+    raw = text[probe + 1 : close].strip()
+    if not raw.isdigit():
+        return 0.0, close + 1
+    return float(int(raw)), close + 1
+
+
 def parse_tick_text(text: str) -> list[TickNote]:
-    """`tick_text` 的逆运算：`A1000F` → `[A(gap 0), F(gap 1000)]`。"""
-    return [TickNote(keys=t.keys, gap=t.gap) for t in scan_tick_tokens(text)]
+    """`tick_text` 的逆运算：`A[800]1000F` → `[A(gap 0, sustain 800), F(gap 1000)]`。"""
+    return [
+        TickNote(keys=t.keys, gap=t.gap, sustain_ms=t.sustain_ms) for t in scan_tick_tokens(text)
+    ]
 
 
 def tick_spans(text: str) -> list[tuple[int, int]]:
@@ -165,7 +223,7 @@ def tick_text_from_score(score: Score) -> str:
         gap = max(0, target - emitted)  # 首音也写：保留开头的休止
         if gap:
             parts.append(str(gap))
-        parts.append("".join(event.keys))
+        parts.append(_render_chord(tuple(event.keys), event.sustain_ms))
         emitted += gap
     return "".join(parts)
 
@@ -224,11 +282,28 @@ class RecordingBuffer:
             return 0.0
         return max(0.0, self._frames[-1] - self._frames[0]) * 1000.0
 
+    @property
+    def last_frame_ts(self) -> float | None:
+        """最后一帧的时间戳（秒，绝对）；没有帧时 `None`。
+
+        停止录制时用它给"还按着的键"补抬：延音要算到**停止这一刻**，
+        而不是最后一个事件所在的那一帧（否则最后按住的音会被截短）。
+        """
+        return self._frames[-1] if self._frames else None
+
     # -- 收尾（主线程） ---------------------------------------------------- #
 
-    def finish(self) -> Recording:
-        """停止录制并产出结果；重复调用返回等价快照（不会重复累加）。"""
+    def finish(self, extra: Sequence[PressEvent] = ()) -> Recording:
+        """停止录制并产出结果；重复调用返回等价快照（不会重复累加）。
+
+        `extra` 是收尾补发的事件（`CaptureWorker.stop_recording` 用 `flush()`
+        给"停止时还按着"的键补抬起）。它**绕过 `closed` 闸门**，因为它属于
+        收尾本身而不是新采集 —— 这样延音能算到停止那一刻，且不会与仍在跑的
+        分析线程抢同一个缓冲（缓冲已先封口）。
+        """
         self._closed = True
+        if extra:
+            self._presses.extend(extra)
         score, notes = self._build_notes()
         return Recording(
             score=score,

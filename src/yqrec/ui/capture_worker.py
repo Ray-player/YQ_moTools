@@ -109,6 +109,13 @@ class CaptureWorker(QThread):
         super().__init__(parent)
         self._lock = threading.Lock()
         self._frame_lock = threading.Lock()
+        self._judge_lock = threading.Lock()
+        """只保护"判按器状态"（`update` / `flush`）。
+
+        分析线程每帧调 `update`，主线程 `stop_recording` 要 `flush` 一次；
+        不加锁的话收尾可能与某一帧的判定交错，导致同一个键抬起两次/延音算错。
+        锁内只做纯内存运算（不 emit 信号），不会死锁。
+        """
         self._running = False
         self._target: CaptureTarget | None = None
         self._spec: InstrumentSpec | None = None
@@ -210,8 +217,9 @@ class CaptureWorker(QThread):
 
         `confirm_frames`、`delta`、`weights` 都是判按器构造时读进去的，不重建就不会生效
         （以前 F5 只换了界面上的 spec，后台还在用旧参数 —— 调 confirm_frames 会"按了没反应"）。
-        重建会丢掉当前按下状态：录制中途按 F5 时，已按下的键不会补一次抬起事件，
-        但谱面 tick 只依赖按下时刻，影响仅限于该次按下的时长。
+        重建会丢掉当前按下状态：录制中途按 F5 时，已按下的键不会补一次抬起事件。
+        M4 起延音也记进谱面（`A[800]`），所以"丢掉按下态"不再只影响时长 —— 会直接
+        丢掉这段延音。录制中请勿改参数（UI 侧已在录制期间锁住相关控件）。
         """
         with self._lock:
             if spec is self._spec:
@@ -286,22 +294,35 @@ class CaptureWorker(QThread):
         """结束录制并返回结果（主线程调用；当时没在录就返回 None）。
 
         只在锁内摘走缓冲，装配在锁外做，避免长时间阻塞分析线程。
+
+        收尾时会用**最后一帧的时间戳**给还按着的键补一次抬起（`PressDetector.flush`）：
+        否则那些键的按住时长只能算到"最后一个事件"那一帧，正在延音的音会被截短
+        （M4 要点：停止识谱时按当前已按下的毫秒数记延音）。
         """
+        flushed: list[PressEvent] = []
         with self._lock:
             rec, self._rec = self._rec, None
             if rec is not None:
                 rec.close()  # 先封口再摘走：保证分析线程不会往收尾中的缓冲追加
         if rec is None:
             return None
+
+        # 收尾：还按着的键按"最后一帧"补一次抬起，延音才能算到停止这一刻。
+        detector = self._detector
+        ts = rec.last_frame_ts
+        if detector is not None and ts is not None:
+            with self._judge_lock:
+                flushed = detector.flush(ts)
+            if flushed:
+                _log.info("录制结束时仍有 %d 个键按住，已按结束时刻补抬起", len(flushed))
         detector = self._detector
         if detector is not None and detector.short_presses:
             _log.info(
-                "本次录制有 %d 次按下刚好用满 %d 帧就确认（最轻的一类短按；"
-                "confirm_frames=1 时即\"只占 1 帧\"）",
+                "本次录制有 %d 次按下刚好用满 %d 帧就确认（最轻的一类短按）",
                 detector.short_presses,
                 detector.confirm_frames,
             )
-        return rec.finish()
+        return rec.finish(flushed)
 
     def stop(self) -> None:
         """请求退出（主线程调用后应 `wait()`）。"""
@@ -450,7 +471,8 @@ class CaptureWorker(QThread):
                 cfg=self._detector_cfg,
                 baseline=self._baseline,
             )
-        events = self._detector.update(rgb, ts)
+        with self._judge_lock:
+            events = self._detector.update(rgb, ts)
         if not events:
             return []
         keys = self._spec.key_order if self._spec is not None else ()

@@ -31,13 +31,27 @@ def test_basic_press_and_release(spec_fwzs):
     assert all(abs(e.ts - 0.10) < 1e-6 for e in downs)
 
 
-def test_single_frame_press_is_kept(spec_fwzs):
-    """M2q.4：只占 1 帧的按下也要保留 —— 轻按/低帧率下这是唯一能救回来的证据。
+def test_single_frame_press_needs_two_frames_by_default(spec_fwzs):
+    """M4：默认 `confirm_frames=2` —— 只亮一帧不算按下。
 
-    旧行为（min_hold=25）要求"后续某一帧仍按下"，等于至少两帧可见，
-    一次只占 1 帧的轻按会被整场丢掉（实测打包版回退 GDI 时最明显）。
+    延音要求"按住态确实持续"，单帧闪一下（动画回弹/压缩噪声）不该被当成按下，
+    否则延音起点会算早、还会多出幽灵音。代价是极轻的单击会漏 → 该乐器调回 1 即可。
     """
     d = PressDetector(spec_fwzs)
+    events = []
+    ts = 0.0
+    events += d.update(_rgb(240), ts)
+    ts += 0.02
+    events += d.update(_rgb(100), ts)  # 单帧按下 → 不够两帧
+    ts += 0.02
+    events += d.update(_rgb(240), ts)
+
+    assert [e for e in events if e.down] == [], "单帧按下不确认（默认两帧）"
+
+
+def test_single_frame_press_is_kept_when_confirm_frames_1(spec_fwzs_single_frame):
+    """把该乐器调回 1 帧确认时，单帧轻按仍能救回来（M2q.4 的老行为）。"""
+    d = PressDetector(spec_fwzs_single_frame)
     events = []
     ts = 0.0
     events += d.update(_rgb(240), ts)
@@ -69,9 +83,9 @@ def test_min_hold_still_filters_when_configured(spec_fwzs):
     assert d.short_presses == 0
 
 
-def test_hysteresis_keeps_down(spec_fwzs):
+def test_hysteresis_keeps_down(spec_fwzs_single_frame):
     cfg = DetectorConfig(min_hold_ms=0, hysteresis=0.15)
-    d = PressDetector(spec_fwzs, cfg=cfg)
+    d = PressDetector(spec_fwzs_single_frame, cfg=cfg)
     # enter=190, exit=218.5；210 在滞回带内 → 仍算按下
     events = d.update(_rgb(100), 0.0)
     assert any(e.down for e in events)
@@ -81,8 +95,8 @@ def test_hysteresis_keeps_down(spec_fwzs):
     assert events and not events[0].down
 
 
-def test_min_gap_suppresses_fast_retrigger(spec_fwzs):
-    d = PressDetector(spec_fwzs, cfg=DetectorConfig(min_hold_ms=0, min_gap_ms=100))
+def test_min_gap_suppresses_fast_retrigger(spec_fwzs_single_frame):
+    d = PressDetector(spec_fwzs_single_frame, cfg=DetectorConfig(min_hold_ms=0, min_gap_ms=100))
     ts = 0.0
     e1 = d.update(_rgb(100), ts)
     ts += 0.01
@@ -94,8 +108,8 @@ def test_min_gap_suppresses_fast_retrigger(spec_fwzs):
     assert e3 == []
 
 
-def test_flush_releases_held_keys(spec_fwzs):
-    d = PressDetector(spec_fwzs, cfg=DetectorConfig(min_hold_ms=0))
+def test_flush_releases_held_keys(spec_fwzs_single_frame):
+    d = PressDetector(spec_fwzs_single_frame, cfg=DetectorConfig(min_hold_ms=0))
     d.update(_rgb(100), 0.0)
     out = d.flush(1.0)
     assert len(out) == 21
@@ -235,7 +249,9 @@ def test_fast_retrigger_is_delayed_not_dropped(spec_fwzs):
     而这两个值随后都不再变化 → 只要一直按着，这个键**永远**判不出按下
     （快速连击同一个键时第二个音整个丢失）。现在改为把计时起点推到当前帧重新数。
     """
-    d = PressDetector(spec_fwzs, cfg=DetectorConfig(min_gap_ms=100))
+    d = PressDetector(
+        _with_confirm(spec_fwzs, 1), cfg=DetectorConfig(min_gap_ms=100)
+    )
     ts = 0.0
     assert any(e.down for e in d.update(_rgb(100), ts)), "第一次按下正常确认"
     ts += 0.01

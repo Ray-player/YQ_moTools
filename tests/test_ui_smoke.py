@@ -450,7 +450,7 @@ def test_any_text_in_box_can_be_saved(
     )
     window._save_score()
     record = json.loads(target.read_text(encoding="utf-8"))
-    assert record["tick"] == {"unit": "ms", "text": "A500F"}
+    assert record["tick"] == {"unit": "ms", "text": "A500F", "sustain": False}
     assert record["capture"]["duration_ms"] == 500
 
     # 同一段文本换 BGI midi 再存一份

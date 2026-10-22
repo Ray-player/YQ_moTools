@@ -248,18 +248,32 @@ YQ_TYPES = (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64)
 """允许的 `[n]` 分母：1/2 全音符、四分、八分、十六分、三十二分 + 三连音族（3/6/12/24/48）。"""
 
 YQ_MAX_HOLD_MS = 100.0
-"""单个音符最多占 100ms。原神乐器按下即发声，时值只影响按键时长。"""
+"""单个音符最多占 100ms（**非延音乐器**）。原神乐器按下即发声，时值只影响按键时长。"""
+
+YQ_MAX_HOLD_MS_SUSTAIN = 4000.0
+"""延音乐器（`sustain_ms > 0`）单个音符的时值上限。
+
+谐律键琴这类乐器**时值就是延音**（按住越久响越久），所以不能套用 100ms 上限，
+否则导出的 yuanqin 谱会把长按全压成 100ms 的短触。仍受"下一个音的起点"约束
+（yuanqin 是线性格式，表达不了叠音）。
+"""
 
 
 def score_from_tick_text(text: str) -> Score:
-    """tick 文本 → `Score`。数字是**毫秒**间隔（`A1000F` = 隔 1 秒），无需帧率。"""
+    """tick 文本 → `Score`。数字是**毫秒**间隔（`A1000F` = 隔 1 秒），无需帧率。
+
+    和弦后缀 `[ms]` 是延音（`A[800]`）：直接进 `NoteEvent.sustain_ms`，
+    导出 BGI 时就是该键的 keyUp 时刻（`build_events` 会按同键下一次按下裁剪）。
+    """
     from ..recording import parse_tick_text  # 延迟导入，避免 formats ↔ recording 循环
 
     events: list[NoteEvent] = []
     cursor = 0.0
     for note in parse_tick_text(text):
         cursor += note.gap  # 首音也加：保留开头的休止
-        events.append(NoteEvent(keys=note.keys, onset_ms=cursor))
+        events.append(
+            NoteEvent(keys=note.keys, onset_ms=cursor, sustain_ms=note.sustain_ms)
+        )
     return Score(events=events, metadata={"source": "tick"})
 
 
@@ -393,11 +407,19 @@ def yuanqin_notes_text(
         keys = tuple(
             sorted((k for k in event.keys if k in order), key=order.__getitem__)
         )
+        sustain = float(event.sustain_ms)
+        limit = max_hold_ms
+        if spec.sustain_ms > 0:
+            # 延音乐器：时值 = keyUp 时刻，允许长于 100ms（见 YQ_MAX_HOLD_MS_SUSTAIN）
+            limit = max(max_hold_ms, YQ_MAX_HOLD_MS_SUSTAIN)
         if index + 1 < len(targets):
             span = targets[index + 1] - target
         else:
-            span = max_hold_ms
-        cap = min(max(min_note_ms, span), max_hold_ms)
+            span = max(max_hold_ms, sustain)
+        # 有显式延音时用它当时值目标（仍不越过下一个音）：staccato 不会被拉长成连奏，
+        # 长按遇到下一个音也会被截断 —— yuanqin 是线性格式，表达不了叠音。
+        hold_target = sustain if sustain > 0 else span
+        cap = min(max(min_note_ms, min(hold_target, span)), limit)
         if index + 1 < len(notes) and set(event.keys) & set(notes[index + 1].keys):
             # 下一个音有共同键：必须留出抬起间隔，且**让中间多出一个 `@` 休止 token** ——
             # BGI 的 `hasCommonChar(本音, 下一 token)` 为真时会扣 30ms 提前抬起再补 60ms，

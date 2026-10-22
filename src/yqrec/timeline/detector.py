@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any
 
-from ..types import InstrumentSpec, KeyThreshold, PressEvent
+from ..types import (
+    DEFAULT_CONFIRM_FRAMES,
+    InstrumentSpec,
+    KeyThreshold,
+    PressEvent,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,7 +18,7 @@ class DetectorConfig:
     min_hold_ms: float = 0.0
     """可选的**绝对时长**下限（`0` = 不启用，默认）。
 
-    与"确认帧数"是两回事：帧数由**乐器**决定（`detection.confirm_frames`，默认 1），
+    与"确认帧数"是两回事：帧数由**乐器**决定（`detection.confirm_frames`，默认 2），
     这里只做"无论帧率多高，至少按住这么久"的补充限制，一般留 0。
     为什么不靠它去抖：`min_hold > 0` 的语义是"必须在**后续某一帧**仍然满足"，
     低帧率下等价于至少 2 帧可见 —— 只占 1 帧的轻按会被整场丢掉（M2q.4 的教训）。
@@ -58,12 +63,15 @@ class PressDetector:
         self._thresholds = thresholds or spec.thresholds
         self._keys = spec.key_order
         self._state = [_KeyState() for _ in self._keys]
-        self._confirm_frames = max(1, int(getattr(spec.detection, "confirm_frames", 1)))
-        """连续多少帧满足条件才确认（来自乐器 `detection.confirm_frames`，默认 1）。"""
+        self._confirm_frames = max(
+            1, int(getattr(spec.detection, "confirm_frames", DEFAULT_CONFIRM_FRAMES))
+        )
+        """连续多少帧满足条件才确认（来自乐器 `detection.confirm_frames`，默认 2）。"""
         self._short_presses = 0
         """刚好用满 `confirm_frames` 帧就确认的按下次数（= 本次最轻的那类按下）。
 
         `confirm_frames=1` 时它就是"只占 1 帧"的计数；调大后可用于观察轻按的帧数分布。
+        默认 2 时它统计"刚好两帧就确认"的按下（最轻的那一类）。
         """
         per_key = _per_key_baseline(spec, self._keys, baseline)
         plan: list[tuple[KeyThreshold, tuple[str, ...]]] = []

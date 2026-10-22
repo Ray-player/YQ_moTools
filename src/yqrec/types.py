@@ -310,6 +310,27 @@ DEFAULT_POINT_PATCH_RATIO = 0.06
 DEFAULT_TOLERANCE = 8
 """`weighted` 判据的默认死区（灰阶）：吃掉各键基准色偏差与噪声。"""
 
+DEFAULT_CONFIRM_FRAMES = 2
+"""连续多少帧满足条件才确认按下（默认 2 = 至少两帧）。
+
+v1.24 曾默认 1（"看到就认"），但延音录制要求"按住态确实持续"——单帧确认会让
+一次闪帧/动画回弹被当成按下，进而把延音起点算早。M4 起默认 2。
+事件时间戳仍记**首帧**，所以调帧数不挪谱面时序。
+"""
+
+DEFAULT_SUSTAIN_MS = 0
+"""乐器延音阈值（毫秒）：`0` = 该乐器不延音；`>0` = 按下时长达到它才记录延音。
+
+这是"乐器级"参数（`assets/instruments.json` 每个乐器的 `sustain_ms`），
+与 `sustain: bool` 的旧写法兼容：只写了 `sustain: true` 时按 `LEGACY_SUSTAIN_MS` 处理。
+"""
+
+LEGACY_SUSTAIN_MS = 200
+"""旧写法 `sustain: true`（没有 `sustain_ms`）时的延音阈值。"""
+
+SUSTAIN_TEXT_MIN_MS = 50
+"""谱面文本里延音后缀 `[ms]` 的写入下限：比它短的延音不写（与 01 §7.1 对齐）。"""
+
 RECORD_CLICK_OFF = 0
 """`record_click` 模式 0：录制启动前不做任何输入注入。"""
 
@@ -383,7 +404,7 @@ class DetectionSpec:
     - `default_delta`: 灵敏度 Δ（JSON 里直接写在乐器上层的 `delta` 字段，便于调试）
     - `unpressed_ref` / `pressed_ref`: 未按下/按下参考色（RGB，可为 None = 待实测）
     - `weights` / `tolerance`: 仅 `weighted` 用；权重缺省时由 refs 的跌幅自动推出
-    - `confirm_frames`: 连续多少帧满足条件才确认按下（默认 1 = 单帧即确认）
+    - `confirm_frames`: 连续多少帧满足条件才确认按下（默认 2 = 至少两帧）
     """
 
     metric: Literal["max_drop", "chroma", "euclid", "weighted", "channel"] = "max_drop"
@@ -393,15 +414,16 @@ class DetectionSpec:
     pressed_ref: tuple[int, int, int] | None = None
     weights: tuple[float, float, float] | None = None
     tolerance: int = DEFAULT_TOLERANCE
-    confirm_frames: int = 1
-    """连续 N 帧都满足按下条件才确认（默认 1 = 单帧即确认）。
+    confirm_frames: int = DEFAULT_CONFIRM_FRAMES
+    """连续 N 帧都满足按下条件才确认（默认 2 = 连续两帧都亮）。
 
     这是"帧数"而不是"时长"：`min_hold_ms` 那种时间闸在低帧率下会把门槛抬到 2 帧以上
     （一帧 50ms 时 50ms ≈ 1 帧，但实现上要等**下一帧**才确认 → 只占 1 帧的轻按必丢）。
-    帧数语义与帧率解耦：`confirm_frames=1` 就是"看到就认"，`=2` 是"连续两帧都亮才算"。
+    帧数语义与帧率解耦：`=1` 就是"看到就认"，`=2` 是"连续两帧都亮才算"。
 
-    调参建议：轻按漏得多 → 保持 1；特效/角色扫过造成零星误判 → 试 2（代价是每次按下
-    确认时刻晚一帧，事件时间戳仍记首帧，所以谱面时序不受影响）。
+    M4 起默认 2（服务延音：单帧闪一下不算按住）。代价是只占 1 帧的极轻按会漏，
+    需要更灵敏时把某乐器调回 1；确认时刻晚一帧，但事件时间戳仍记首帧，
+    所以谱面时序不受影响。
     """
     note: str = ""
 
@@ -419,6 +441,13 @@ class InstrumentSpec:
     button_radius: float
     thresholds: dict[str, KeyThreshold]
     detection: DetectionSpec = field(default_factory=DetectionSpec)
+    sustain_ms: int = DEFAULT_SUSTAIN_MS
+    """延音阈值（毫秒，`assets/instruments.json` 的乐器级 `sustain_ms`）。
+
+    这是延音的**唯一真相**：`0` = 不延音；`>0` = 按下时长达到它才记录延音。
+    `sustain` 布尔字段保留下来只是为了兼容旧调用方/旧 JSON，构造时会被本字段归一化
+    （见 `__post_init__`）——判断"有没有延音"请用 `sustain`，取阈值请用本字段。
+    """
 
     def __post_init__(self) -> None:
         if self.key_count <= 0:
@@ -434,6 +463,14 @@ class InstrumentSpec:
             missing = set(area.keys) - keys
             if missing:
                 raise ValueError(f"{self.id}/{area.code}: 含未知键 {sorted(missing)}")
+
+        # 延音：`sustain_ms` 优先；只写了旧 `sustain: true` 时按 LEGACY_SUSTAIN_MS 兜底。
+        threshold = int(self.sustain_ms)
+        if threshold <= 0 and self.sustain:
+            threshold = LEGACY_SUSTAIN_MS
+        threshold = max(0, threshold)
+        object.__setattr__(self, "sustain_ms", threshold)
+        object.__setattr__(self, "sustain", threshold > 0)
 
     # -- 便捷访问 ---------------------------------------------------------- #
 

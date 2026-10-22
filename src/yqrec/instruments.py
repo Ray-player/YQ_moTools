@@ -10,6 +10,7 @@ from pathlib import Path
 from .logging import get_logger
 from .types import (
     DEFAULT_RECORD_CLICK_MODE,
+    LEGACY_SUSTAIN_MS,
     RECORD_CLICK_MOUSE,
     RECORD_CLICK_OFF,
     RING_OUTER_RATIO,
@@ -23,6 +24,9 @@ from .types import (
 _log = get_logger("instruments")
 
 _VALID_METRICS = ("max_drop", "chroma", "euclid", "weighted", "channel")
+
+MAX_SUSTAIN_MS = 20000
+"""`sustain_ms` 的合法上界（20s）：再长基本是"手离开但画面没恢复"，属异常。"""
 _VALID_CHANNELS = ("R", "G", "B")
 
 _KEYS_PER_ROW = 7
@@ -294,6 +298,34 @@ def _valid_key_count(raw: dict, inst_id: str) -> int | None:
     return key_count
 
 
+def _parse_sustain_ms(raw: dict, inst_id: str) -> int:
+    """乐器级 `sustain_ms`（int，0 = 不延音，>0 = 延音阈值毫秒）。
+
+    兼容旧写法：只写了 `sustain: true` 而没有 `sustain_ms` → 记 info 并按
+    `LEGACY_SUSTAIN_MS` 处理（真正的归一化在 `InstrumentSpec.__post_init__`）。
+    越界/非数值一律回落 0 并记 warning，绝不抛。
+    """
+    value = raw.get("sustain_ms")
+    if value is None:
+        if raw.get("sustain"):
+            _log.info("%s: 只有旧 sustain=true，按 %d ms 阈值兼容", inst_id, LEGACY_SUSTAIN_MS)
+        return 0
+    try:
+        threshold = int(value)
+    except (TypeError, ValueError):
+        _log.warning("%s: sustain_ms=%r 不是整数，按不延音处理", inst_id, value)
+        return 0
+    if not 0 <= threshold <= MAX_SUSTAIN_MS:
+        _log.warning(
+            "%s: sustain_ms=%s 越界（应在 0~%d），按不延音处理",
+            inst_id,
+            threshold,
+            MAX_SUSTAIN_MS,
+        )
+        return 0
+    return threshold
+
+
 def load_instruments(path: Path | str | None = None) -> dict[str, InstrumentSpec]:
     """加载乐器表，返回 `{id: InstrumentSpec}`（**插入顺序 = JSON 顺序 = 下拉顺序**）。"""
     p = Path(path) if path else instruments_path()
@@ -323,7 +355,7 @@ def load_instruments(path: Path | str | None = None) -> dict[str, InstrumentSpec
                 id=inst_id,
                 name=str(raw["name"]),
                 key_count=key_count,
-                sustain=bool(raw["sustain"]),
+                sustain=bool(raw.get("sustain", False)),
                 areas=areas,
                 note_to_key=dict(raw["note_to_key"]),
                 note_to_audio=dict(raw["note_to_audio"]),
@@ -335,6 +367,7 @@ def load_instruments(path: Path | str | None = None) -> dict[str, InstrumentSpec
                     inst_id,
                     delta=None if raw.get("delta") is None else _int_or(raw.get("delta"), 40),
                 ),
+                sustain_ms=_parse_sustain_ms(raw, inst_id),
             )
         except (KeyError, TypeError, ValueError) as exc:
             _log.warning("%s: 解析失败（%s），已跳过该乐器", inst_id, exc)

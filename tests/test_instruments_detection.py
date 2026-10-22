@@ -107,12 +107,12 @@ def test_detection_spec_loaded_and_falls_back() -> None:
 
 
 def test_confirm_frames_parsed_and_clamped() -> None:
-    """`detection.confirm_frames`：缺省 1（单帧即确认），合法值透传，越界回落 1。"""
-    assert parse_detection(None, "demo").confirm_frames == 1, "缺段 → 默认单帧即确认"
+    """`detection.confirm_frames`：缺省 2（M4 起至少两帧），合法值透传，越界回落 2。"""
+    assert parse_detection(None, "demo").confirm_frames == 2, "缺段 → 默认两帧确认"
     assert parse_detection({"confirm_frames": 3}, "demo").confirm_frames == 3
-    assert parse_detection({"confirm_frames": 1}, "demo").confirm_frames == 1
-    assert parse_detection({"confirm_frames": 0}, "demo").confirm_frames == 1, "0 越界 → 回落"
-    assert parse_detection({"confirm_frames": 99}, "demo").confirm_frames == 1, "过大 → 回落"
+    assert parse_detection({"confirm_frames": 1}, "demo").confirm_frames == 1, "1 仍是合法值"
+    assert parse_detection({"confirm_frames": 0}, "demo").confirm_frames == 2, "0 越界 → 回落"
+    assert parse_detection({"confirm_frames": 99}, "demo").confirm_frames == 2, "过大 → 回落"
     assert parse_detection({"confirm_frames": "2"}, "demo").confirm_frames == 2, "字符串数字也吃"
 
 
@@ -121,16 +121,16 @@ def test_every_instrument_declares_confirm_frames() -> None:
     data = json.loads(ASSETS.read_text(encoding="utf-8"))
     for inst in data["instruments"]:
         assert "confirm_frames" in inst["detection"], f"{inst['id']} 缺 detection.confirm_frames"
-        assert inst["detection"]["confirm_frames"] >= 1
+        assert inst["detection"]["confirm_frames"] >= 2, "M4 起默认至少两帧（延音要求）"
 
 
 def test_confirm_frames_parsed_and_clamped() -> None:
-    """`detection.confirm_frames`：缺省 1（单帧即确认），合法值透传，越界回落 1。"""
-    assert parse_detection(None, "demo").confirm_frames == 1, "缺段 → 默认单帧即确认"
+    """`detection.confirm_frames`：缺省 2（M4 起至少两帧），合法值透传，越界回落 2。"""
+    assert parse_detection(None, "demo").confirm_frames == 2, "缺段 → 默认两帧确认"
     assert parse_detection({"confirm_frames": 3}, "demo").confirm_frames == 3
-    assert parse_detection({"confirm_frames": 1}, "demo").confirm_frames == 1
-    assert parse_detection({"confirm_frames": 0}, "demo").confirm_frames == 1, "0 越界 → 回落"
-    assert parse_detection({"confirm_frames": 99}, "demo").confirm_frames == 1, "过大 → 回落"
+    assert parse_detection({"confirm_frames": 1}, "demo").confirm_frames == 1, "1 仍是合法值"
+    assert parse_detection({"confirm_frames": 0}, "demo").confirm_frames == 2, "0 越界 → 回落"
+    assert parse_detection({"confirm_frames": 99}, "demo").confirm_frames == 2, "过大 → 回落"
     assert parse_detection({"confirm_frames": "2"}, "demo").confirm_frames == 2, "字符串数字也吃"
 
 
@@ -139,7 +139,7 @@ def test_every_instrument_declares_confirm_frames() -> None:
     data = json.loads(ASSETS.read_text(encoding="utf-8"))
     for inst in data["instruments"]:
         assert "confirm_frames" in inst["detection"], f"{inst['id']} 缺 detection.confirm_frames"
-        assert inst["detection"]["confirm_frames"] >= 1
+        assert inst["detection"]["confirm_frames"] >= 2, "M4 起默认至少两帧（延音要求）"
 
 
 def _rewrite(path: Path, data: dict) -> None:

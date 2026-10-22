@@ -1,6 +1,6 @@
-# CONTRACTS · 接口契约 v1.25（M0 冻结 + P1/P2 加法增补）
+# CONTRACTS · 接口契约 v1.35（M0 冻结 + P1/P2 加法增补）
 
-> 状态：**v1.25**（M2 录制链路 + UI 设置 + 试听 + 路径记忆 + BetterGI 互转/yuanqin + tick 毫秒制 + 录制期只读 + 窗口尺寸/位置记忆 + chroma 判据 + 外环采样 + 判据分派修复 + 检测方式切换 + 全局采样几何与配置热重载 + **分段点采样 / weighted 判据 / 逐键基线 / 半径滑条写回 JSON**）。变更流程：**升版本号 → 广播受影响 owner → 同步改测试 → 本文件记变更**。
+> 状态：**v1.35**（M2 录制链路 + UI 设置 + 试听 + 路径记忆 + BetterGI 互转/yuanqin + tick 毫秒制 + 录制期只读 + 窗口尺寸/位置记忆 + chroma 判据 + 外环采样 + 判据分派修复 + 检测方式切换 + 全局采样几何与配置热重载 + 分段点采样 / weighted 判据 / 逐键基线 / 半径滑条写回 JSON + **乐器级 `sustain_ms` 延音录制 / 谱面 `[ms]` 后缀 / confirm_frames 默认 2**）。变更流程：**升版本号 → 广播受影响 owner → 同步改测试 → 本文件记变更**。
 > 详细语义见 [03 · 实现规格](03-实现规格与接口契约.md)；本文只列"谁必须提供什么"。
 
 ---
@@ -31,7 +31,7 @@ class NotImplementedYet(YQRecError): ...   # M0 占位，调用即报
 | `KeyPoint` | `u, v, r`（r 以 1920 宽归一化）；`.to_pixels(w,h)` |
 | `KeyGrid` | `points, key_count`；`len(points) == key_count` |
 | `Circle` | `x, y, r` |
-| `InstrumentSpec` | `id/name/key_count/sustain/areas/note_to_key/note_to_audio/hough/button_radius/thresholds`；`note_order/key_order/area_of_key/threshold_of_key` |
+| `InstrumentSpec` | `id/name/key_count/sustain/areas/note_to_key/note_to_audio/hough/button_radius/thresholds/detection/sustain_ms`；`note_order/key_order/area_of_key/threshold_of_key`。**v1.35**：新增 `sustain_ms:int`（0=不延音，>0=延音阈值毫秒，唯一真相）；`sustain:bool` 保留但由它归一化（旧的 `sustain:true` → `LEGACY_SUSTAIN_MS=200`） |
 | `RgbSample` | `ts, rgb(K,3)` |
 | `PressEvent` | `key, down, ts` |
 | `NoteEvent` | `keys, onset_ms, sustain_ms=0` |
@@ -132,6 +132,8 @@ class PressDetector(spec, thresholds=None, cfg=None):
 
 class AssembleConfig: chord_window_ms=25.0, min_rest_ms=1.0, scene_guard=True
 def assemble(presses, spec, cfg=None) -> list[ScoreEvent]
+    # v1.35：和弦 sustain_ms = max(达到 spec.sustain_ms 阈值的 hold)；不足阈值记 0；
+    #        值为**完整按住时长**（不是超出阈值的部分）；spec.sustain_ms==0 恒 0
 ```
 
 ## 6. 格式（`src/yqrec/formats/`）
@@ -254,18 +256,21 @@ yqrec record --source {screen,file,synth} [--rect L,T,W,H] [--input PATH]
 ```python
 # src/yqrec/recording.py
 @dataclass RecordedNote: keys / onset_ms / onset_frame / gap_ms / sustain_ms
-@dataclass TickNote:     keys / gap                 # 从文本解析出的和弦（单位见 tick.unit）
+@dataclass TickNote:     keys / gap / sustain_ms=0   # v1.35：`[ms]` 后缀
+@dataclass TickToken:    keys / gap / start / end / sustain_ms=0
 @dataclass Recording:    score / notes / frames / duration_ms / fps
-                         .tick_text -> str     # `A1000F`：和弦字母连写 + **毫秒**间隔
-def tick_text(notes) -> str                        # 写入端（v1.12 起记毫秒）
-def parse_tick_text(text) -> list[TickNote]        # 逆运算（字母=和弦，数字=间隔）
+                         .tick_text -> str     # `A[800]1000F`：字母 + `[ms]` 延音 + **毫秒**间隔
+def tick_text(notes) -> str                        # 写入端（v1.12 起记毫秒；v1.35 加延音）
+def parse_tick_text(text) -> list[TickNote]        # 逆运算（字母=和弦，`[ms]`=延音，数字=间隔）
 
 class RecordingBuffer(spec, chord_window_ms=25.0):
     push_frame(ts)                 # 登记采集帧（worker 线程，持锁）
     push_events(events)            # 追加该帧判出的事件（worker 线程，持锁）
     snapshot() -> dict             # {"text","notes","frames","duration_ms"}，录制中实时刷
     close()                        # 封口：之后 push_* 丢弃（stop 时先调，防收尾竞态）
-    finish() -> Recording          # 主线程收尾；时间轴以本次录制首帧为 0 点
+    last_frame_ts -> float | None  # v1.35：最后一帧时间戳（收尾补抬用）
+    finish(extra=()) -> Recording  # 主线程收尾；时间轴以本次录制首帧为 0 点
+                                   # v1.35：`extra` 绕过封口追加收尾事件（stop 时 flush 的抬起）
 
 # src/yqrec/scorefile.py
 TICK_UNIT_MS = "ms" ; TICK_UNIT_FRAME = "frame"
@@ -293,18 +298,21 @@ suggested_filename(score_format="tick", *, prefix="谱面") -> str
 + `record_progress` 信号），**不接 `Session`** —— `Session` 自带捕获后端与分析线程，与预览线程并列会
 对同一区域开两份捕获、两份采样。`Session` 只服务 CLI/回归。
 
-**谱面 JSON（`version: 3`, `format: "yqrec.recording"`）**
+**谱面 JSON（`version: 4`, `format: "yqrec.recording"`）**
 
 ```jsonc
 {
-  "version": 3, "format": "yqrec.recording", "score_format": "tick",
+  "version": 4, "format": "yqrec.recording", "score_format": "tick",
   "name": "谱面_tick_20261020_1650",
   "created_at": "2026-10-20T16:50:12+08:00",
   "instrument": { "id": "fwzs", "name": "风物之诗", "key_count": 21 },
   "capture": { "backend": "gdi", "fps": 59.8, "frames": 742, "duration_ms": 12400 },
-  "tick": { "unit": "ms", "text": "A1000F" }
+  "tick": { "unit": "ms", "text": "A[800]1000F", "sustain": true }
 }
 ```
+
+**v4（v1.35）**：`tick.text` 支持 `[ms]` 延音后缀；`tick.sustain` 是"这份谱面含延音"的
+标记（旧版 exe 打开 v4 文件不会报错，但会丢延音 —— 使用说明里写明延音谱面用新版打开）。
 
 > **单一数据源**：`tick.text` 就是谱面本身，文件里不再有 `events[]`。
 > **v3 起 `tick.unit = "ms"`**：数字直接是毫秒，不用任何 fps；间隔用"累计已输出毫秒"差分，
@@ -405,6 +413,41 @@ class KeyPointSampler:                      # 与 KeySampler 接口对齐
 v1.26 只动**视觉层**（`ui/theme.py`、`ui/qss.py`、`ui/widgets.py` 与各 UI 文件的绘制/挂档代码），
 识别、录制、谱面与配置契约不变；`settings.json` 里的 `ui.theme` 旧值（无该字段）默认按 `light` 读入。
 
+## 9.2 v1.35 新增/变更（延音录制 M4）
+
+```python
+# types.py
+DEFAULT_CONFIRM_FRAMES = 2          # DetectionSpec.confirm_frames 默认 1 → 2
+DEFAULT_SUSTAIN_MS = 0；LEGACY_SUSTAIN_MS = 200；SUSTAIN_TEXT_MIN_MS = 50
+class InstrumentSpec: ...; sustain_ms: int = 0      # 构造时归一化 sustain = sustain_ms > 0
+class DetectionSpec:  confirm_frames: int = 2
+
+# instruments.py
+MAX_SUSTAIN_MS = 20000
+_parse_sustain_ms(raw, inst_id) -> int              # 非法/越界 → 0 + warning，绝不抛
+load_instruments() → spec.sustain_ms 由 JSON 乐器级 `sustain_ms` 读入
+
+# timeline/assembler.py
+_chord_sustain(chord, threshold_ms) -> float        # 达阈值的 hold 取 max，否则 0
+
+# recording.py
+SUSTAIN_TEXT_MIN_MS 起：tick_text / tick_text_from_score 渲染 `<CHORD>[<ms>]`
+scan_tick_tokens / _read_sustain：解析 `[ms]`（非法吃整段、未闭合不吃）
+TickNote.sustain_ms / TickToken.sustain_ms；RecordingBuffer.last_frame_ts / finish(extra=…)
+
+# scorefile.py
+RECORD_VERSION = 4；tick.sustain 标记；score_from_record 透传 sustain_ms
+
+# formats/bgi_sheet.py
+score_from_tick_text 透传 sustain_ms（此前延音在"文本→BGI"这一段丢失）
+yuanqin_notes_text：延音乐器（spec.sustain_ms>0）音符时值上限 100ms → 4000ms
+                    （谐律键琴的时值就是延音），仍不越过下一个音的起点
+
+# ui/capture_worker.py
+_judge_lock（只保护 detector.update/flush）；stop_recording 先 close 再 flush，
+把补抬事件交给 finish(extra=…)，避免与分析线程抢判按器状态
+```
+
 ## 9. 变更记录
 
 | 版本 | 日期 | 变更 |
@@ -451,3 +494,4 @@ v1.26 只动**视觉层**（`ui/theme.py`、`ui/qss.py`、`ui/widgets.py` 与各
 | **v1.32** | 2026-10-22 | **j-HDR 后端（用户要求，不影响原链路）**：① 新增 `capture/hdr_backend.py::HdrBackend`（`name="hdr"`，界面显示 `j-HDR`），用 `j-hdrcapture` 的 `Capture(timeout_ms=16)` + `grab_region(l,t,w,h)` 取帧，输出 `HxWx3 uint8 BGR`；`pick_monitor()` 要求区域完整落在**单块屏**内（跨屏拒绝，否则库会去合成整个虚拟桌面）；`InitialFrameTimeout` → 返回 None（计丢帧、不逼降级），`AccessLost`/`DimensionsChanged` → `RuntimeError`（触发回退/重建）。② `manager.FALLBACK_CHAINS` + `order_candidates()`：用户选 j-HDR 时 `hdr → dxgi → gdi`；选 dxgi 时仍是 `dxgi → gdi`（不会偷偷用 hdr）；`prefer` 为空/auto 时保持 `default_backends()` 原顺序（dxgi 仍第一）。③ `manager.BACKEND_LABELS` / `backend_label()`：内部名 `hdr` → 界面 `j-HDR`，状态栏徽标、启动/停止提示、回退提示统一走它。④ 主窗「后端」下拉加 `j-HDR` 项（`setFixedSize` 74→**88**，`j-HDR` 实测 60px + 箭头会被裁），`_backend_preference()` 白名单加 `hdr`；profile 的 `backend` 直接存 `hdr`，`findData` 可回读。⑤ `pyproject.toml` 加 `j-hdrcapture>=0.1.0`（abi3 wheel，零第三方依赖）；`build/yqrec.spec` `hiddenimports` 加 `hdrcapture`（延迟导入，不加会静默缺包）。⑥ **顺带优化 dxcam 打包**：`collect_submodules("dxcam", filter=...)` 排除 `core.winrt_duplicator` 并同步写入 `EXCLUDES`（只在 `backend="winrt"` 的函数内懒加载、依赖未安装的 winrt；实测剪除后包内已无该文件）；保留 collect 而非硬编码清单，避免 dxcam 升版漏模块又静默回退 GDI。⑦ `assets/使用说明.txt` 补 HDR 排查指引（选 j-HDR；**切 HDR / 切后端后必须重学基线**）。**明确未动**：`dxgi_backend`/`gdi_backend`/`wgc_backend`、判据与采样算法、谱面格式、默认后端。 |
 | **v1.33** | 2026-10-22 | **默认截图方式改 j-HDR + 记住选择（M3e，用户要求）**：① `AppConfig.backend` 默认 `"dxgi"` → **`"hdr"`**；`load_config()` 缺省值同步；`CaptureManager.default_backends()` 顺序改为 `[hdr, dxgi, wgc, gdi, …]`，CLI `--backend auto`（不带 prefer）也随之 hdr 优先；`_backend_preference()` / `_save_profile()` 兜底值改 `hdr`。② 下拉顺序改为 **`j-HDR`(第 0 项) / `dxgi` / `gdi`**，tooltip 同步（并注明"选择会被记住"）。③ **选择持久化**：新增 `MainWindow._on_backend_changed()` → 写 `AppConfig.backend` + `_save_app_config()`；构造下拉后按 `findData(cfg.backend)` 还原（脏值/空值回落 `hdr`）。④ **标定档不再覆盖后端**：`_load_profile()` 里 `findData(profile.backend)` 整段删除 —— 标定档只记录标定当时用了什么，覆盖会让用户每次启动被拽回旧值。⑤ `CONFIG_VERSION 3 → 4`：`_migrate()` 新增 v3→v4 把 `backend` 强制置 `hdr`（v4 之前 UI 从不回写该字段，档里的 `dxgi` 只是序列化出来的默认值，不是用户选择；不迁移则"改默认"对已有档完全无效）。**未动**：判据/采样算法、谱面格式、`hdr_backend`/`dxgi_backend` 实现、回退链语义。 |
 | **v1.34** | 2026-10-22 | **首次运行建档 + 打包日志修复（M3f，用户报告关闭按钮置灰）**：① `MainWindow.__init__` 末尾（`_load_profile()` 之后）新增 `if not config_path().exists(): self._save_app_config()` —— 把首次运行的 `mkdir %APPDATA%\YQ_moTools + 新建 settings.json` 提前到 `show()` 之前，消除窗口可见后唯一一次首次运行主线程写盘（窗口几何 400ms 防抖触发），根除杀软实时扫描下卡主线程 >5s 触发 Windows ghost 窗口（标题栏 X 被系统置灰的唯一机制）；防抖落盘此后因「值没变」跳过。② `app._log_dir()` 相对导入 `from .config import …` 改**绝对导入**：frozen 下 `app.py` 以 `__main__`（无父包）运行，相对导入 ImportError 被 `run_gui()` 的 `except Exception` 静默吞掉 → **打包版文件日志从未装上过**（真实机数据目录无 `logs/` 即铁证）；except 分支补 traceback 留档 `%TEMP%\yqrec_log_fail.txt`。③ `cli.main()` 对 `gui` 子命令跳过无目录的 `setup_logging()`（否则 `_configured` 置位、`run_gui` 幂等跳过、文件 handler 永远装不上）。**未动**：判据/采样算法、谱面格式、配置文件 schema、后端实现。规矩沉淀见 03 §17。 |
+| **v1.35** | 2026-10-22 | **谐律键琴延音录制（M4，用户要求）**：① 延音开关改为**乐器级 `sustain_ms`**（int；0=不延音，>0=按下时长达到该毫秒数才记延音），旧 `sustain: true` 兼容为 200ms；谐律键琴取 300ms；② `detection.confirm_frames` **默认 1 → 2**（至少两帧确认，延音需要"按住态持续"的证据），6 个乐器 JSON 同步；③ 谱面文本新增 `[ms]` 后缀（`A[800]1000F`），`tick_text`/`scan_tick_tokens` 对称实现，谱面 JSON `version 3 → 4` + `tick.sustain` 标记；④ `stop_recording` 用最后一帧时间戳 `flush()` 补抬，停止时会话中按住的键按已按下毫秒数记延音（`RecordingBuffer.finish(extra=…)`）；⑤ 修掉"文本 → BetterGI"丢延音（`score_from_tick_text`），yuanqin 对延音乐器放宽时值上限到 4000ms；⑥ 判按器 update/flush 加锁，避免收尾与分析线程竞态 |

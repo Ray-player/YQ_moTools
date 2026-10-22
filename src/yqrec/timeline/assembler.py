@@ -27,6 +27,22 @@ class _Note:
     hold_ms: float
 
 
+def _chord_sustain(chord: Sequence[_Note], threshold_ms: float) -> float:
+    """和弦的延音值：取**达到阈值**的那些键里最长的按住时长；都不够则为 0。
+
+    阈值来自乐器级 `sustain_ms`（`assets/instruments.json`）：
+    - `0` → 该乐器不延音，恒 0；
+    - `>0` → 按下时长 ≥ 阈值才算延音，值是**完整按住时长**（不是"超出阈值的那部分"），
+      因为 tick 的 `[ms]` 语义就是 keyUp 时刻，少算会把音截短。
+
+    和弦内不同键时长不同时取最大值 —— 本格式没有 per-key 延音（03 §5.3 有说明）。
+    """
+    if threshold_ms <= 0:
+        return 0.0
+    qualifying = [n.hold_ms for n in chord if n.hold_ms >= threshold_ms]
+    return max(qualifying, default=0.0)
+
+
 def assemble(
     presses: Sequence[PressEvent],
     spec: InstrumentSpec,
@@ -34,7 +50,8 @@ def assemble(
 ) -> list[ScoreEvent]:
     """把事件流装配成 NoteEvent/RestEvent 序列。
 
-    - sustain：乐器 `sustain=True` 时取和弦内最大 hold；否则恒 0（一期）；
+    - sustain：乐器 `sustain_ms > 0` 时，取和弦内**达到该阈值**的键里最大 hold
+      （未达到阈值的短按不记延音）；`sustain_ms == 0` 的乐器恒 0；
     - rest_i = onset_{i+1} - onset_i；最后一个和弦后不加休止；
     - 若两 onset 差 < `min_rest_ms`，按 `min_rest_ms` 写出（避免粘连）。
     """
@@ -60,7 +77,7 @@ def assemble(
     for idx, chord in enumerate(chords):
         keys = tuple(sorted({n.key for n in chord}, key=lambda k: order.get(k, 10_000)))
         onset = min(n.onset_ms for n in chord)
-        sustain = max((n.hold_ms for n in chord), default=0.0) if spec.sustain else 0.0
+        sustain = _chord_sustain(chord, spec.sustain_ms)
         events.append(NoteEvent(keys=keys, onset_ms=onset, sustain_ms=sustain))
         if idx + 1 < len(chords):
             next_onset = min(n.onset_ms for n in chords[idx + 1])

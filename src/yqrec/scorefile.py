@@ -24,7 +24,7 @@ from .recording import Recording, TickNote, parse_tick_text
 from .types import InstrumentSpec, NoteEvent, RestEvent, Score, ScoreEvent
 
 RECORD_FORMAT = "yqrec.recording"
-RECORD_VERSION = 3
+RECORD_VERSION = 4
 """schema 版本：v3 起 `tick.unit = "ms"`（v2 是 `frame`，v1 还带冗余 `events[]`）。"""
 
 TICK_UNIT_MS = "ms"
@@ -85,7 +85,11 @@ def build_record(
             "frames": int(recording.frames),
             "duration_ms": round(float(recording.duration_ms), 1),
         },
-        "tick": {"unit": TICK_UNIT_MS, "text": recording.tick_text},
+        "tick": {
+            "unit": TICK_UNIT_MS,
+            "text": recording.tick_text,
+            "sustain": any(note.sustain_ms > 0 for note in recording.notes),
+        },
     }
     if extra:
         record["extra"] = dict(extra)
@@ -128,7 +132,11 @@ def build_record_from_text(
             "frames": int(round(total_ms * fps_value / 1000.0)) if fps_value else 0,
             "duration_ms": total_ms,
         },
-        "tick": {"unit": TICK_UNIT_MS, "text": text.strip()},
+        "tick": {
+            "unit": TICK_UNIT_MS,
+            "text": text.strip(),
+            "sustain": any(note.sustain_ms > 0 for note in notes),
+        },
     }
     if extra:
         record["extra"] = dict(extra)
@@ -267,7 +275,9 @@ def score_from_record(record: dict[str, Any]) -> Score:
             gap = note.gap * factor
             events.append(RestEvent(ms=gap))
             cursor += gap
-        events.append(NoteEvent(keys=note.keys, onset_ms=cursor))
+        events.append(
+            NoteEvent(keys=note.keys, onset_ms=cursor, sustain_ms=note.sustain_ms)
+        )
     instrument = record.get("instrument") or {}
     metadata = {
         "name": str(record.get("name", "")),
