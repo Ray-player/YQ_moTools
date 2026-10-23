@@ -34,6 +34,7 @@ python tools/build_release.py      # 打包 → dist/YQ_moTools/YQ_moTools.exe�
 | [docs/02-计划-开发与协作](docs/02-计划-开发与协作.md) | 里程碑与工期、协作规则、文档更新规则、迭代记录 |
 | [docs/03-实现规格与接口契约](docs/03-实现规格与接口契约.md) | **代码级规格**（写码必读）：数据模型、算法规格、格式语法、JSON schema、踩坑清单 |
 | [docs/CONTRACTS.md](docs/CONTRACTS.md) | 冻结的接口契约清单 |
+| [docs/07-tick格式曲谱规则](docs/07-tick格式曲谱规则.md) | **曲谱语法速查**（给 Agent / 外部工具）：tick 文本语法、延音、JSON 封装、BGI 转换、常见错误 |
 | [docs/M0 / M2 / M3-完成记录](docs/) | 各里程碑交付物、设计理由、踩坑、已知限制（**接手先读 M3-完成记录**） |
 
 文档更新规则（谁改哪份）见 [02 §文档更新规则](docs/02-计划-开发与协作.md)。
