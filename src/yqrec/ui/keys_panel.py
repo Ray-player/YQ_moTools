@@ -126,6 +126,7 @@ class KeysPanel(QWidget):
         self._layout.setContentsMargins(8, 0, 8, 8)
         self._layout.setSpacing(4)
         self._cards: list[KeyCard] = []
+        self._key_order: tuple[str, ...] = ()
         self._area_of_key: dict[str, str] = {}
         self._channel_by_area: dict[str, str] = {}
         self._baseline: np.ndarray | None = None
@@ -141,6 +142,7 @@ class KeysPanel(QWidget):
                 widget.deleteLater()
         self._cards = []
         self._area_of_key = {}
+        self._key_order = tuple(spec.key_order)
         notes = spec.note_order
         for index, key in enumerate(spec.key_order):
             note = notes[index] if index < len(notes) else str(index + 1)
@@ -239,3 +241,26 @@ class KeysPanel(QWidget):
     def clear_press(self) -> None:
         for card in self._cards:
             card.set_pressed(False)
+
+    # -- 试听回放（M2q.11） -------------------------------------------------- #
+
+    def show_playback(self, pressed: dict[str, float]) -> None:
+        """按**录制实况**点亮键位（试听刚录的谱面时用）。
+
+        `pressed` = `{键: 按下时的 Δ}`。没有画面可采，所以 RGB 一行统一显示 `—/—/—`，
+        第三行给录制时记下的 Δ —— 用户能看到"这一下是按多深才被认出来的"。
+        读取来的谱面没有逐键数据，调用方不会走到这里。
+        """
+        for index, key in enumerate(self._key_order):
+            if index >= len(self._cards):
+                break
+            card = self._cards[index]
+            delta = pressed.get(key)
+            card.set_metrics(None, delta)
+            card.set_pressed(delta is not None)
+
+    def end_playback(self) -> None:
+        """退出试听回放：全部熄灭、数值复位（别留着上一轮的 Δ 冒充实时值）。"""
+        for card in self._cards:
+            card.set_pressed(False)
+            card.set_metrics(None, None)

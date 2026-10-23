@@ -116,7 +116,11 @@ def test_record_json_has_no_events_and_restores_from_text(
 
     record = build_record(recording, spec_fwzs, name="测试", backend="gdi")
     assert record["format"] == RECORD_FORMAT
-    assert record["version"] == 4
+    assert record["version"] == 5
+    assert record["type"] == "tick", "顶层要标曲谱类型（v5）"
+    assert list(record)[:4] == ["version", "type", "Average_Delta", "Min_Delta"], (
+        "type 紧跟 version，Δ 统计紧跟 type"
+    )
     assert record["tick"]["sustain"] is False, "不延音的乐器不标记延音"
     assert "events" not in record, "谱面数据只留 tick.text，不再冗余展开"
     assert record["tick"] == {"unit": TICK_UNIT_MS, "text": "A48F", "sustain": False}

@@ -20,6 +20,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes as wt
 import time
+from pathlib import Path
 
 from .logging import get_logger
 
@@ -27,12 +28,14 @@ _log = get_logger("inputsim")
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_SCANCODE = 0x0008
 VK_SPACE = 0x20
 HWND_TOP = 0
 HWND_TOPMOST = -1
@@ -41,6 +44,46 @@ SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
 SWP_SHOWWINDOW = 0x0040
 GA_ROOT = 2
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+TOKEN_QUERY = 0x0008
+TokenElevation = 20
+"""UIPI 判定用：目标进程是否提权（管理员）。不匹配时系统会**静默丢弃**注入的键鼠。"""
+
+kernel32.OpenProcess.restype = wt.HANDLE
+kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.QueryFullProcessImageNameW.argtypes = [
+    wt.HANDLE,
+    wt.DWORD,
+    wt.LPWSTR,
+    ctypes.POINTER(wt.DWORD),
+]
+advapi32.OpenProcessToken.argtypes = [wt.HANDLE, wt.DWORD, ctypes.POINTER(wt.HANDLE)]
+advapi32.GetTokenInformation.argtypes = [
+    wt.HANDLE,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    wt.DWORD,
+    ctypes.POINTER(wt.DWORD),
+]
+user32.MapVirtualKeyW.argtypes = [wt.UINT, wt.UINT]
+user32.GetWindowTextLengthW.argtypes = [wt.HWND]
+user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.UINT]
+user32.SetForegroundWindow.argtypes = [wt.HWND]
+user32.GetForegroundWindow.restype = wt.HWND
+user32.GetAncestor.argtypes = [wt.HWND, wt.UINT]
+user32.GetAncestor.restype = wt.HWND
+user32.WindowFromPoint.argtypes = [wt.POINT]
+user32.WindowFromPoint.restype = wt.HWND
+
+# `GetWindowLong` 只是 32 位 SDK 的宏，64 位 user32 里没有这个导出名（只有 …W / …PtrW）。
+# 老代码直接 `user32.GetWindowLong(...)` 在 64 位下会 AttributeError —— 只在"强提兜底"分支
+# 才会走到，所以线上没暴露（首次 SetForegroundWindow 通常就成功）。
+_get_window_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+_get_window_long.argtypes = [wt.HWND, ctypes.c_int]
+_get_window_long.restype = ctypes.c_ssize_t
 
 
 class _MOUSEINPUT(ctypes.Structure):
@@ -83,14 +126,123 @@ def _send_mouse(flags: int) -> bool:
 
 
 def _send_key(vk: int, flags: int) -> bool:
-    """投递一条键盘事件；失败记 warning 返回 False。"""
+    """投递一条键盘事件；失败记 warning 返回 False。
+
+    `flags` 含 `KEYEVENTF_SCANCODE` 时按**扫描码**发（`wVk` 必须为 0）—— DirectInput /
+    RawInput 的游戏（原神这类 Unity 游戏）常常只认扫描码，VK-only 的注入会被它们无视。
+    """
     inp = _INPUT(type=INPUT_KEYBOARD)
-    inp.ki.wVk = vk
+    inp.ki.wVk = 0 if flags & KEYEVENTF_SCANCODE else vk
     inp.ki.dwFlags = flags
+    if flags & KEYEVENTF_SCANCODE:
+        inp.ki.wScan = int(user32.MapVirtualKeyW(vk, 0))  # MAPVK_VK_TO_VSC
     if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) != 1:
         _log.warning("SendInput(VK=0x%x, 0x%x) 失败: winerror=%s", vk, flags, ctypes.get_last_error())
         return False
     return True
+
+
+class _TOKEN_ELEVATION(ctypes.Structure):
+    _fields_ = [("TokenIsElevated", wt.DWORD)]
+
+
+def process_name(pid: int) -> str:
+    """进程名（读不到返回空串；受保护进程会被拒）。"""
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wt.DWORD(len(buf))
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return Path(buf.value).name
+    except Exception:  # pragma: no cover - 极端情况
+        return ""
+    finally:
+        kernel32.CloseHandle(handle)
+    return ""
+
+
+def is_elevated(pid: int) -> bool | None:
+    """进程是否以管理员（高完整性）运行；读不到返回 None（受保护进程）。"""
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return None
+    try:
+        token = wt.HANDLE()
+        if not advapi32.OpenProcessToken(handle, TOKEN_QUERY, ctypes.byref(token)):
+            return None
+        try:
+            info = _TOKEN_ELEVATION()
+            size = wt.DWORD(ctypes.sizeof(info))
+            ok = advapi32.GetTokenInformation(
+                token,
+                TokenElevation,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
+                ctypes.byref(size),
+            )
+            return bool(info.TokenIsElevated) if ok else None
+        finally:
+            kernel32.CloseHandle(token)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def window_process(hwnd: int) -> tuple[int, str]:
+    """窗口所属进程 `(pid, 进程名)`；失败返回 `(0, "")`。"""
+    pid = wt.DWORD()
+    user32.GetWindowThreadProcessId(int(hwnd), ctypes.byref(pid))
+    return (int(pid.value), process_name(pid.value)) if pid.value else (0, "")
+
+
+def window_title(hwnd: int, limit: int = 60) -> str:
+    """窗口标题（诊断日志用；太长截断，避免一整行被标题占满）。"""
+    length = user32.GetWindowTextLengthW(int(hwnd))
+    if length <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(int(hwnd), buf, length + 1)
+    text = buf.value.strip().replace("\n", " ")
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def foreground_window() -> int:
+    """当前前台窗口句柄（0 = 没有前台窗口）。"""
+    return int(user32.GetForegroundWindow() or 0)
+
+
+def describe(hwnd: int) -> str:
+    """`0x1059a msedge.exe「标题…」`：日志里写清"打到谁身上了"，一行够用。"""
+    if not hwnd:
+        return "0x0（无窗口）"
+    pid, name = window_process(hwnd)
+    title = window_title(hwnd)
+    tail = f"「{title}」" if title else ""
+    return f"0x{hwnd:x} {name or '?'}{tail}"
+
+
+def injection_hint(hwnd: int) -> str:
+    """判断"注入了也不会生效"的典型情形，返回给界面的提示；正常返回空串。
+
+    最常见的一种：**目标进程以管理员运行，本程序没有** —— Windows 的 UIPI 会把低完整性
+    进程注入的键鼠**静默丢弃**，`SendInput` 依然返回成功，于是日志里有记录、游戏没反应。
+    （2026-10-23 用户实机就是这么回事：日志有"注入"行，但游戏没动。）
+    """
+    pid, name = window_process(hwnd)
+    if not pid:
+        return ""
+    target = is_elevated(pid)
+    if target is None:
+        return ""
+    ours = is_elevated(kernel32.GetCurrentProcessId())
+    if target and not ours:
+        label = name or f"PID {pid}"
+        return (
+            f"目标程序「{label}」以管理员权限运行，本程序没有 → "
+            "注入的键鼠会被系统丢弃（右键本程序→以管理员身份运行）"
+        )
+    return ""
 
 
 def left_click(x: int, y: int, *, hold_ms: int = 60, restore_cursor: bool = True) -> bool:
@@ -133,15 +285,18 @@ def _restore(saved: tuple[int, int] | None) -> None:
         _log.warning("恢复光标到 (%d, %d) 失败: winerror=%s", *saved, ctypes.get_last_error())
 
 
-def press_space(*, hold_ms: int = 60) -> bool:
-    """向前台窗口模拟一次空格按下→抬起（SendInput，VK_SPACE 非扩展键）。
+def press_space(*, hold_ms: int = 60, use_scan_code: bool = True) -> bool:
+    """向前台窗口模拟一次空格按下→抬起。
 
     **调用方必须先确认目标窗口确实在前台**（见 ``activate_window``）——
     空格落到本程序焦点控件上会触发按钮（如再次点中「录制」立即停录）。
+
+    `use_scan_code=True` 走扫描码（DirectInput / RawInput 的游戏才认，见 `_send_key`）。
     """
-    ok = _send_key(VK_SPACE, 0)
+    flags = KEYEVENTF_SCANCODE if use_scan_code else 0
+    ok = _send_key(VK_SPACE, flags)
     time.sleep(max(0, int(hold_ms)) / 1000.0)
-    ok = _send_key(VK_SPACE, KEYEVENTF_KEYUP) and ok
+    ok = _send_key(VK_SPACE, flags | KEYEVENTF_KEYUP) and ok
     return ok
 
 
@@ -183,7 +338,7 @@ def activate_window(hwnd: int) -> bool:
     if user32.SetForegroundWindow(hwnd) and user32.GetForegroundWindow() == hwnd:
         return True
     # 强提：TOPMOST↔NOTOPMOST 翻转后再试一次（MAA 同款兜底）
-    topmost_flag = user32.GetWindowLong(hwnd, -20) & 0x8  # GWL_EXSTYLE, WS_EX_TOPMOST
+    topmost_flag = int(_get_window_long(hwnd, -20) or 0) & 0x8  # GWL_EXSTYLE, WS_EX_TOPMOST
     insert_after = HWND_NOTOPMOST if topmost_flag else HWND_TOPMOST
     user32.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
     ok = bool(user32.SetForegroundWindow(hwnd)) and user32.GetForegroundWindow() == hwnd

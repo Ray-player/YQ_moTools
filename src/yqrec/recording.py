@@ -47,6 +47,26 @@ class RecordedNote:
 
 
 @dataclass(frozen=True, slots=True)
+class KeySpan:
+    """一个键的**一次按下区间**（毫秒，相对录制首帧）。
+
+    只活在内存里的 `Recording` 上（**不落盘**）：试听刚录的谱面时用它把键位状态灯
+    按录制实况点亮 —— 什么时候按下、什么时候弹起、按下那一刻的 Δ。
+    谱面文本/JSON 里没有这份数据，所以读取来的文件无法回放键位。
+    """
+
+    key: str
+    down_ms: float
+    up_ms: float
+    delta: float = 0.0
+    """按下时的判据量 Δ（0 = 老数据/没有判据值）。"""
+
+    @property
+    def hold_ms(self) -> float:
+        return max(0.0, self.up_ms - self.down_ms)
+
+
+@dataclass(frozen=True, slots=True)
 class Recording:
     """一次录制的不可变结果。"""
 
@@ -55,6 +75,8 @@ class Recording:
     frames: int
     duration_ms: float
     fps: float
+    spans: tuple[KeySpan, ...] = ()
+    """逐键按下区间（按 `down_ms` 升序）。给试听回放用；空 = 没有回放数据。"""
 
     @property
     def note_count(self) -> int:
@@ -63,6 +85,23 @@ class Recording:
     @property
     def tick_text(self) -> str:
         return tick_text(self.notes)
+
+    @property
+    def press_deltas(self) -> tuple[float, ...]:
+        """所有"有判据值"的按下（逐键，不按和弦合并）。"""
+        return tuple(span.delta for span in self.spans if span.delta > 0)
+
+    @property
+    def avg_delta(self) -> float:
+        """识别的平均 Δ（无数据 → 0.0）。"""
+        values = self.press_deltas
+        return sum(values) / len(values) if values else 0.0
+
+    @property
+    def min_delta(self) -> float:
+        """识别的最小 Δ（无数据 → 0.0；最接近阈值的那一次，用来判断余量）。"""
+        values = self.press_deltas
+        return min(values) if values else 0.0
 
 
 def tick_text(notes: tuple[RecordedNote, ...] | list[RecordedNote]) -> str:
@@ -304,13 +343,14 @@ class RecordingBuffer:
         self._closed = True
         if extra:
             self._presses.extend(extra)
-        score, notes = self._build_notes()
+        score, notes, spans = self._build_notes()
         return Recording(
             score=score,
             notes=notes,
             frames=len(self._frames),
             duration_ms=self.duration_ms,
             fps=self._fps,
+            spans=spans,
         )
 
     @property
@@ -320,19 +360,19 @@ class RecordingBuffer:
             return 0.0
         return (len(self._frames) - 1) / span
 
-    def _build_notes(self) -> tuple[Score, tuple[RecordedNote, ...]]:
-        """装配谱面 + 毫秒间隔。
+    def _build_notes(self) -> tuple[Score, tuple[RecordedNote, ...], tuple[KeySpan, ...]]:
+        """装配谱面 + 毫秒间隔 + 逐键按下区间。
 
         `frames` 以本次录制的首帧为 0 点，事件 ts 同步平移 —— 因此 `onset_ms`
         从 0 开始；`gap_ms` 用**累计已输出毫秒**做差分（不是每个音各自取整），
         保证整首谱的时间轴误差 ≤0.5ms、不随音数漂移。
         """
         if not self._frames or not self._presses:
-            return Score(), ()
+            return Score(), (), ()
         t0 = self._frames[0]
         frames_rel = [ts - t0 for ts in self._frames]
         presses = [
-            PressEvent(key=e.key, down=e.down, ts=max(0.0, float(e.ts) - t0))
+            PressEvent(key=e.key, down=e.down, ts=max(0.0, float(e.ts) - t0), delta=float(e.delta))
             for e in self._presses
         ]
         cfg = AssembleConfig(chord_window_ms=self.chord_window_ms)
@@ -359,4 +399,47 @@ class RecordingBuffer:
                     sustain_ms=float(event.sustain_ms),
                 )
             )
-        return score, tuple(notes)
+        return score, tuple(notes), key_spans(presses, last_ts=frames_rel[-1])
+
+
+def key_spans(presses: Sequence[PressEvent], *, last_ts: float | None = None) -> tuple[KeySpan, ...]:
+    """按下/抬起配对成 `KeySpan`（同一套"先按下先配对"规则，与 `assembler._pair_notes` 一致）。
+
+    - 只有按下没有抬起的键（录制被强行切断）：按 `last_ts`（一般传最后一帧时刻）闭合；
+      不传就退回最后一个事件时刻（hold 可能是 0，但仍会显示一次点亮）；
+    - 入参 `presses` 的 ts 必须已经是"相对录制首帧"的秒。
+    """
+    if not presses:
+        return ()
+    ordered = sorted(presses, key=lambda e: e.ts)
+    closing_ts = max(ordered[-1].ts, float(last_ts or 0.0))
+    pending: dict[str, list[PressEvent]] = {}
+    spans: list[KeySpan] = []
+    for event in ordered:
+        if event.down:
+            pending.setdefault(event.key, []).append(event)
+            continue
+        stack = pending.get(event.key)
+        if not stack:
+            continue
+        down = stack.pop(0)
+        spans.append(
+            KeySpan(
+                key=event.key,
+                down_ms=down.ts * 1000.0,
+                up_ms=max(down.ts, event.ts) * 1000.0,
+                delta=float(down.delta),
+            )
+        )
+    for key, stack in pending.items():
+        for down in stack:
+            spans.append(
+                KeySpan(
+                    key=key,
+                    down_ms=down.ts * 1000.0,
+                    up_ms=max(down.ts, closing_ts) * 1000.0,
+                    delta=float(down.delta),
+                )
+            )
+    spans.sort(key=lambda s: (s.down_ms, s.key))
+    return tuple(spans)

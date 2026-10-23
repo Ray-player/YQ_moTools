@@ -100,8 +100,13 @@ class PressDetector:
 
     def _signals(
         self, rgb: tuple[int, int, int], thr: KeyThreshold, channels: tuple[str, ...]
-    ) -> tuple[bool, bool] | None:
-        """返回 (可按下, 可保持按下)。"""
+    ) -> tuple[bool, bool, float] | None:
+        """返回 (可按下, 可保持按下, 判据值)。
+
+        判据值 = 该模式的标量 Δ（与 `thr.delta` 同口径），随按下事件一起带出去，
+        供谱面记录"这次按下有多强"（平均/最小 Δ 校验）与试听回放显示。
+        旧 `channel` 模式没有标量判据，用**通道最大跌幅**代替（与面板 Δ 列一致）。
+        """
         if thr.mode in ("max_drop", "chroma", "euclid", "weighted"):
             # 颜色偏离语义：标量偏离 >= Δ 按下，回弹 15% 才抬起。
             # 三种模式各自的"偏离量"必须在这里分派 —— 漏掉 chroma 会掉进单通道区间分支，
@@ -115,7 +120,7 @@ class PressDetector:
             else:
                 value = float(thr.euclid_distance(rgb))
             enter = float(thr.delta)
-            return (value >= enter, value >= enter * (1.0 - self._cfg.hysteresis))
+            return (value >= enter, value >= enter * (1.0 - self._cfg.hysteresis), value)
         limits = self._limits(thr, channels)
         if limits is None:
             return None
@@ -131,7 +136,7 @@ class PressDetector:
                 can_press = False
             if value > exit_v:
                 keep = False
-        return can_press, keep
+        return can_press, keep, float(thr.max_drop(rgb))
 
     # -- 公开 API ---------------------------------------------------------- #
 
@@ -144,7 +149,7 @@ class PressDetector:
             sig = self._signals((int(rgb[i][0]), int(rgb[i][1]), int(rgb[i][2])), thr, channels)
             if sig is None:
                 continue
-            can_press, keep = sig
+            can_press, keep, metric = sig
             st = self._state[i]
 
             if not st.down:
@@ -162,7 +167,7 @@ class PressDetector:
                             st.down_ts = st.pending_since  # 时间戳仍记首帧，确认晚一帧不挪时序
                             if st.seen <= self._confirm_frames:
                                 self._short_presses += 1
-                            out.append(PressEvent(key=key, down=True, ts=st.down_ts))
+                            out.append(PressEvent(key=key, down=True, ts=st.down_ts, delta=metric))
                         else:
                             # 距上次抬起还不够 `min_gap`：把计时起点推到本帧重新数。
                             # 否则 `pending_since` 与 `last_up_ts` 都不再变化 → 条件永远不成立，

@@ -24,8 +24,32 @@ from .recording import Recording, TickNote, parse_tick_text
 from .types import InstrumentSpec, NoteEvent, RestEvent, Score, ScoreEvent
 
 RECORD_FORMAT = "yqrec.recording"
-RECORD_VERSION = 4
-"""schema 版本：v3 起 `tick.unit = "ms"`（v2 是 `frame`，v1 还带冗余 `events[]`）。"""
+RECORD_VERSION = 5
+"""schema 版本：
+
+- v5（2026-10-23）：顶层加 **`type: "tick"`**（曲谱类型，与 BetterGI 的 `type` 同一位置同一语义）
+  与 **`Average_Delta` / `Min_Delta`**（本次识别的按下 Δ 均值/最小值）；
+- v4：`tick.sustain` / `preview_only` 时代；v3 起 `tick.unit = "ms"`；
+  v2 是 `frame`，v1 还带冗余 `events[]`。旧版一律可读（谱面只靠 `tick.text`）。
+"""
+
+SCORE_TYPE_TICK = "tick"
+"""`type` 的取值：本项目的毫秒间隔谱面。
+
+和 BetterGI 曲谱顶层的 `type`（`"midi"` / `"yuanqin"`）是**同一个位置、同一种用途**
+（判别文件类型），所以放在 `version` 后面紧跟。
+"""
+
+DELTA_AVG_KEY = "Average_Delta"
+DELTA_MIN_KEY = "Min_Delta"
+"""识别质量统计的键名。值是四舍五入后的整数灰阶，`0` = 无识别数据
+（手输 / 读取的谱面重新保存）。写盘只用 `Average_Delta` 这一种拼写。"""
+
+DELTA_AVG_KEY_LEGACY = "Avage_Delta"
+"""**只读兼容**：v1.43 那半天里写出去的键名（`Average` 的笔误）。
+
+v1.44 起写盘一律用 `Average_Delta`，但 `record_delta_stats()` 仍认这个旧键 ——
+用户在那个窗口期存过的谱面不该突然读不出平均 Δ。新代码**不要**再写它。"""
 
 TICK_UNIT_MS = "ms"
 TICK_UNIT_FRAME = "frame"
@@ -74,6 +98,9 @@ def build_record(
     moment = now or datetime.now().astimezone()
     record: dict[str, Any] = {
         "version": RECORD_VERSION,
+        "type": SCORE_TYPE_TICK,
+        DELTA_AVG_KEY: int(round(recording.avg_delta)),
+        DELTA_MIN_KEY: int(round(recording.min_delta)),
         "format": RECORD_FORMAT,
         "score_format": score_format,
         "name": name,
@@ -104,6 +131,7 @@ def build_record_from_text(
     name: str = "",
     backend: str = "",
     score_format: str = DEFAULT_SCORE_FORMAT,
+    delta_stats: tuple[float, float] | None = None,
     extra: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -111,6 +139,9 @@ def build_record_from_text(
 
     文本按毫秒制解释（`A1000F` = 隔 1000ms），所以不需要 fps；
     `capture` 里的 fps/frames 只作记录，不参与换算（谱面时间轴全在 `tick.text` 里）。
+
+    `delta_stats` = `(平均 Δ, 最小 Δ)`：只有"文本仍等于本次录制"的调用方才有，
+    其余情况写 0（表示无识别数据，不代表识别得很弱）。
     """
     moment = now or datetime.now().astimezone()
     notes = parse_tick_text(text)
@@ -119,8 +150,12 @@ def build_record_from_text(
         fps_value = round(float(fps), 2) if fps and fps > 0 else 0.0
     except (TypeError, ValueError):
         fps_value = 0.0
+    avg_delta, min_delta = delta_stats if delta_stats else (0.0, 0.0)
     record: dict[str, Any] = {
         "version": RECORD_VERSION,
+        "type": SCORE_TYPE_TICK,
+        DELTA_AVG_KEY: int(round(float(avg_delta))),
+        DELTA_MIN_KEY: int(round(float(min_delta))),
         "format": RECORD_FORMAT,
         "score_format": score_format,
         "name": name,
@@ -152,6 +187,7 @@ def save_record_text(
     backend: str = "",
     fps: float = 0.0,
     score_format: str = DEFAULT_SCORE_FORMAT,
+    delta_stats: tuple[float, float] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> Path:
     """把文本框里的谱面文本直接存成 JSON（不需要先有一份 `Recording`）。"""
@@ -166,6 +202,7 @@ def save_record_text(
         name=name or target.stem,
         backend=backend,
         score_format=score_format,
+        delta_stats=delta_stats,
         extra=extra,
     )
     target.write_text(
@@ -221,6 +258,30 @@ def record_tick_text(record: dict[str, Any]) -> str:
     if isinstance(tick, dict):
         return str(tick.get("text", ""))
     return ""
+
+
+def record_score_type(record: dict[str, Any]) -> str:
+    """顶层 `type`（v5 起是 `"tick"`）；旧文件没有这个键 → 空串。"""
+    return str(record.get("type") or "").strip().lower()
+
+
+def record_delta_stats(record: dict[str, Any]) -> tuple[int, int]:
+    """`(Average_Delta, Min_Delta)`；旧文件/无识别数据 → `(0, 0)`。
+
+    兼容 v1.43 的笔误键 `Avage_Delta`（只读不写）。
+    """
+    raw_avg = record.get(DELTA_AVG_KEY)
+    if raw_avg is None:
+        raw_avg = record.get(DELTA_AVG_KEY_LEGACY)
+    try:
+        avg = int(raw_avg or 0)
+    except (TypeError, ValueError):
+        avg = 0
+    try:
+        low = int(record.get(DELTA_MIN_KEY) or 0)
+    except (TypeError, ValueError):
+        low = 0
+    return avg, low
 
 
 def record_notes(record: dict[str, Any]) -> list[TickNote]:

@@ -42,7 +42,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSlider,
+    QSpacerItem,
     QSplitter,
     QStatusBar,
     QTextEdit,
@@ -75,7 +77,7 @@ from ..instruments import (
     update_sampling,
 )
 from ..logging import get_logger
-from ..recording import Recording, tick_spans, tick_text_from_score
+from ..recording import KeySpan, Recording, tick_spans, tick_text_from_score
 from ..scorefile import (
     DEFAULT_SCORE_FORMAT,
     load_record,
@@ -113,7 +115,7 @@ from .keys_panel import MAX_CHANNEL, KeysPanel
 from .playback import PlaybackController
 from .preview import EDIT_MODE_ADD, EDIT_MODE_DELETE, EDIT_MODE_DRAG, PreviewWidget
 from .region_picker import RegionPicker
-from .widgets import EditPanel, StatusDot, VLine, panel_shadow
+from .widgets import EditPanel, PlaybackProgress, StatusDot, VLine, panel_shadow
 
 _log = get_logger("ui.main_window")
 
@@ -129,6 +131,12 @@ BGI_YQ_FORMAT = "bgi_yuanqin"
 
 BGI_FORMATS: dict[str, str] = {BGI_MIDI_FORMAT: "midi", BGI_YQ_FORMAT: "yuanqin"}
 """下拉标识 → BGI 的 `type` 字段。"""
+
+PROGRESS_TICK_MS = 40
+"""试听进度条刷新间隔（ms）：40 ≈ 25fps，够连续又不白烧主线程。"""
+
+KEY_FLASH_MIN_MS = 60
+"""试听回放时一次按下至少点亮多久（ms）：40ms 采样下短于这个值可能整帧跳过。"""
 
 RADIUS_MIN = 20
 RADIUS_MAX_RING = 95
@@ -257,6 +265,26 @@ class MainWindow(QMainWindow):
         """当前高亮的和弦下标（与 `_tick_spans` 同序）。"""
         self._paused_at = 0
         """暂停那一刻的高亮位置；继续播放时若位置被移动过就要 seek。"""
+        self._scrubbing = False
+        """正在拖动进度条（拖动期间 40ms 定时器不许改进度，否则打架）。"""
+        self._scrub_was_playing = False
+        """按下进度条之前是不是在播：松手后要接着播，还是留在暂停态。"""
+        self._play_spans: tuple[KeySpan, ...] = ()
+        """本次试听可回放的**逐键按下区间**（只有"刚录的谱面"才有，读取的文件恒空）。"""
+        self._shown_pressed: dict[str, float] = {}
+        """上一帧点亮了哪些键（`{键: Δ}`）；与新的集合相同就不重刷面板，省掉 21 张卡的重绘。"""
+        self._parked_ms: float | None = None
+        """暂停时"停在哪个时刻"（ms）。
+
+        暂停/快退快进/拖进度条之后，播放头不能再用 `onset_of(_cursor)` 反推 ——
+        那样一松手进度条就跳回和弦起点（拖动看着像回弹），键位也会重新点亮已松开的键。
+        `None` 表示还没定过，退回和弦起点（老行为）。
+        """
+
+        # 试听进度（M2q.10）：40ms ≈ 25fps，肉眼连续；再快只是白烧主线程
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(PROGRESS_TICK_MS)
+        self._progress_timer.timeout.connect(self._on_progress_tick)
 
         # 编辑态控件
         self._edit_panel: EditPanel | None = None
@@ -617,8 +645,15 @@ class MainWindow(QMainWindow):
         self._play_bar = QWidget()
         self._play_bar.setObjectName("PlayBar")
         play_bar = QHBoxLayout(self._play_bar)
-        play_bar.setContentsMargins(2, 2, 2, 2)
+        play_bar.setContentsMargins(5, 2, 2, 2)  # 左边多留一点：进度条不要贴住胶囊圆角
         play_bar.setSpacing(0)
+        # 进度条（M2q.10）：在图标组**左侧**，吃掉「试听」按钮让出的宽度
+        self._play_progress = PlaybackProgress(self._play_bar)
+        self._play_progress.scrub_started.connect(self._on_scrub_started)
+        self._play_progress.scrubbed.connect(self._on_scrub_move)
+        self._play_progress.seek_released.connect(self._on_scrub_released)
+        play_bar.addWidget(self._play_progress, 1)
+        play_bar.addSpacing(2)
         self._btn_rewind = self._make_media_button(
             "rewind", "快退一个和弦（按住连续后退，不发声）", repeat=True
         )
@@ -642,9 +677,15 @@ class MainWindow(QMainWindow):
         save_row.addWidget(self._combo_format)
         save_row.addWidget(self._btn_save_score)
         save_row.addWidget(self._btn_load_score)
-        save_row.addStretch(1)
+        # 试听模式里进度条要吃这段留白：用显式 spacer 而不是 addStretch()，
+        # 才好按模式改它的伸展策略（索引魔法数字太脆）。
+        self._actions_row = save_row
+        self._play_spacer = QSpacerItem(
+            0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+        )
+        save_row.addSpacerItem(self._play_spacer)
         save_row.addWidget(self._btn_play)
-        save_row.addWidget(self._play_bar)
+        save_row.addWidget(self._play_bar, 1)
         return save_row
 
     # -- 主题 -------------------------------------------------------------- #
@@ -697,6 +738,7 @@ class MainWindow(QMainWindow):
         )
         self._btn_rewind.setIcon(media_icon("rewind", size=18, colors=media_colors))
         self._btn_forward.setIcon(media_icon("forward", size=18, colors=media_colors))
+        self._play_progress.refresh_style()
         self._keys_panel.refresh_style()
         self._preview.refresh_theme()
         self._update_instrument_dot()
@@ -1989,7 +2031,17 @@ class MainWindow(QMainWindow):
             _log.exception("录制启动输入注入（模式 %d）异常", mode)
 
     def _record_click_mouse(self, cx: int, cy: int) -> None:
-        """模式 2：框选区域中心模拟一次左键点击（点完恢复光标）。"""
+        """模式 2：框选区域中心模拟一次左键点击（点完恢复光标）。
+
+        先尝试激活该点所在窗口再点：窗口在后台时，第一次点击往往只被用来"激活窗口"，
+        游戏侧等于没收到这一下。
+        """
+        hwnd = self._warn_if_injection_blocked(cx, cy, mode=2)
+        if hwnd:
+            try:
+                inputsim.activate_window(hwnd)
+            except Exception:
+                _log.exception("激活窗口 0x%x 异常（继续点击）", hwnd)
         try:
             ok = inputsim.left_click(cx, cy)
         except Exception:
@@ -1998,7 +2050,34 @@ class MainWindow(QMainWindow):
         if not ok:
             self._flash_status("录制启动模拟点击失败（详见日志），录制继续")
             return
-        _log.info("录制启动模拟点击: (%d, %d)", cx, cy)
+        _log.info(
+            "录制启动模拟点击: (%d, %d) → 目标 %s", cx, cy, inputsim.describe(hwnd)
+        )
+
+    def _warn_if_injection_blocked(self, cx: int, cy: int, *, mode: int) -> int:
+        """注入前判断"注入了也不会生效"，并把"打到谁身上"写进日志；返回目标窗口句柄。
+
+        两件事都会在这里暴露：
+        - **目标窗口不是你以为的那个**（点落在了别的程序上）→ 日志写明进程名 + 标题；
+        - **UIPI 权限不匹配**（目标以管理员运行、本程序没有）→ 系统会**静默丢弃**注入，
+          `SendInput` 照样返回成功，日志里有记录、游戏没反应，极难查。
+        """
+        try:
+            hwnd = inputsim.window_at(cx, cy)
+            if not hwnd:
+                _log.warning("注入前定位 (%d, %d) 未命中窗口", cx, cy)
+                return 0
+            hint = inputsim.injection_hint(hwnd)
+        except Exception:
+            _log.exception("检查注入权限异常（模式 %d）", mode)
+            return 0
+        _log.info(
+            "注入目标: %s @ (%d, %d)（模式 %d）", inputsim.describe(hwnd), cx, cy, mode
+        )
+        if hint:
+            _log.warning("注入可能无效（模式 %d）：%s", mode, hint)
+            self._toast("注入不生效：目标程序以管理员运行", "warn", detail=hint)
+        return hwnd
 
     def _record_click_focus_space(self, cx: int, cy: int) -> None:
         """模式 1：激活区域所在窗口后模拟一次空格（安全阀见 01 §15）。
@@ -2017,6 +2096,7 @@ class MainWindow(QMainWindow):
         if inputsim.is_own_window(hwnd) or hwnd == int(self.winId()):
             _log.warning("区域中心 (%d, %d) 命中本程序窗口，不发空格", cx, cy)
             return
+        self._warn_if_injection_blocked(cx, cy, mode=1)
         try:
             ok = inputsim.activate_window(hwnd)
         except Exception:
@@ -2033,7 +2113,11 @@ class MainWindow(QMainWindow):
         if not sent:
             self._flash_status("录制启动空格注入失败（详见日志），录制继续")
             return
-        _log.info("录制启动空格注入: 窗口 0x%x @ (%d, %d)", hwnd, cx, cy)
+        _log.info(
+            "录制启动空格注入: 目标 %s → 前台 %s（扫描码发送）",
+            inputsim.describe(hwnd),
+            inputsim.describe(inputsim.foreground_window()),
+        )
 
     def _toggle_record(self) -> None:
         if self._recording:
@@ -2218,7 +2302,7 @@ class MainWindow(QMainWindow):
             self._flash_status(f"已保存（{fmt}）：{saved}")
 
     def _save_tick_json(self, path: Path | str, text: str) -> Path:
-        """tick 格式落盘：若是本次录制，保留 capture 里的真实采集信息。"""
+        """tick 格式落盘：若是本次录制，保留 capture 里的真实采集信息 + Δ 统计。"""
         result = self._record_result
         extra = {"profile": PROFILE_NAME, "delta": self._delta()}
         if result is not None and result.tick_text.strip() == text:
@@ -2230,6 +2314,9 @@ class MainWindow(QMainWindow):
                 score_format=DEFAULT_SCORE_FORMAT,
                 extra=extra,
             )
+        # 文本被改过（或不是录制来的）：采集信息不可信，但**识别质量统计**仍属这次录制，
+        # 一并写进去；完全没有录制（手输/读取后另存）就是 (0, 0)，即"无识别数据"。
+        stats = (result.avg_delta, result.min_delta) if result is not None else None
         return save_record_text(
             path,
             text,
@@ -2237,6 +2324,7 @@ class MainWindow(QMainWindow):
             backend=self._last_backend,
             fps=float(getattr(result, "fps", 0.0) or 0.0),
             score_format=DEFAULT_SCORE_FORMAT,
+            delta_stats=stats,
             extra=extra,
         )
 
@@ -2407,27 +2495,161 @@ class MainWindow(QMainWindow):
         """切到试听模式：入口按钮原位换成控制条，并从头（或指定和弦）开始播。"""
         self._play_mode = True
         self._paused = False
+        self._scrubbing = False
         self._paused_at = self._cursor = max(0, int(start))
+        self._play_spans = self._spans_of_current_score()
+        self._shown_pressed = {}
+        self._parked_ms = None
         self._btn_play.hide()
         self._play_bar.show()
+        self._play_spacer.changeSize(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
+        self._actions_row.invalidate()  # 让出留白给进度条
         self._highlight_at(self._cursor)
         if not self._playback.play_from(self._cursor):
             self._set_error("试听失败：谱面为空")
             self._exit_play_mode()
             return
         self._sync_play_buttons()
+        self._sync_progress()
+        self._progress_timer.start()
         self._refresh_action_emphasis()
+        if self._play_spans:
+            self._flash_status(
+                f"试听中 · 同步回放录制键位（{len(self._play_spans)} 次按下，含按下 Δ）"
+            )
 
     def _exit_play_mode(self) -> None:
         """退出试听模式：控制条换回入口按钮，清高亮。"""
+        had_spans = bool(self._play_spans)
         self._play_mode = False
         self._paused = False
+        self._scrubbing = False
         self._paused_at = self._cursor = 0
+        self._play_spans = ()
+        self._shown_pressed = {}
+        self._parked_ms = None
+        self._progress_timer.stop()
+        self._play_progress.reset()
+        self._play_spacer.changeSize(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self._actions_row.invalidate()
         self._play_bar.hide()
         self._btn_play.show()
+        if had_spans:  # 回放点亮的键要熄掉，否则停在这里像"还按着"
+            self._keys_panel.end_playback()
         self._record_view.setExtraSelections([])
         self._refresh_playback_enabled()
         self._refresh_action_emphasis()
+
+    def _spans_of_current_score(self) -> tuple[KeySpan, ...]:
+        """当前试听谱面的逐键区间：**只认同一次录制产生的那个 `Score` 对象**。
+
+        文本一改（或读取了文件），`_playback_score` 就换成新对象 / `_record_result` 置空，
+        这里自然拿不到数据 —— 键位回放只在"刚录完直接试听"时生效，符合用户要求。
+        数据从内存里的 `Recording` 直接取，不重新解析文件。
+        """
+        result = self._record_result
+        if result is None or self._playback_score is not result.score:
+            return ()
+        return result.spans
+
+    # -- 试听进度（M2q.10） -------------------------------------------------- #
+
+    def _playhead_ms(self) -> float:
+        """进度条/键位回放共用的"现在到哪了"。
+
+        暂停时优先用 `_parked_ms`（暂停/拖动/快进快退落到的那一刻）；没有就退回
+        和弦起点 —— 直接读 `position_ms` 不行：暂停后位置被挪过，读冻结值会"条子不动"。
+        """
+        if not self._paused:
+            return self._playback.position_ms
+        if self._parked_ms is not None:
+            return self._parked_ms
+        return self._playback.onset_of(self._cursor)
+
+    def _sync_progress(self) -> None:
+        """把播放头画到进度条上，并按录制实况点亮键位。"""
+        if not self._play_mode:
+            return
+        head = self._playhead_ms()
+        self._play_progress.set_progress(head, self._playback.duration_ms)
+        self._sync_key_playback(head)
+
+    def _sync_key_playback(self, head_ms: float) -> None:
+        """试听时按录制的按下区间点亮键位（含按下那一刻的 Δ）。
+
+        只在"本次录制的谱面"上生效（`_play_spans` 非空）；数据全在内存里，
+        每 40ms 扫一遍几百个区间，成本可以忽略（且 `_shown_pressed` 相同就直接返回）。
+        """
+        if not self._play_spans:
+            return
+        pressed: dict[str, float] = {}
+        for span in self._play_spans:  # 已按 down_ms 升序
+            if span.down_ms > head_ms:
+                break
+            # 极短的按下（<=1 帧）也要亮一下，否则进度条扫过去看着像没按
+            if head_ms < max(span.up_ms, span.down_ms + KEY_FLASH_MIN_MS):
+                pressed[span.key] = span.delta
+        if pressed == self._shown_pressed:
+            return
+        self._shown_pressed = pressed
+        self._keys_panel.show_playback(pressed)
+
+    def _on_progress_tick(self) -> None:
+        """定时刷新（拖动期间让位给鼠标，否则两个源抢同一个把手）。"""
+        if self._scrubbing:
+            return
+        self._sync_progress()
+
+    def _on_scrub_started(self) -> None:
+        """按下进度条：先暂停，再让拖动独占播放头。
+
+        不暂停的话，40ms 定时器会把把手拽回真实播放位置（手感是"拖不动/回弹"），
+        而且松手后还得从旧位置重开，白播一段。
+        """
+        if not self._play_mode:
+            return
+        self._scrubbing = True
+        self._scrub_was_playing = not self._paused
+        self._progress_timer.stop()
+        if self._scrub_was_playing:
+            self._playback.pause()  # 会经 state_changed 回来自已设 _paused = True
+            self._paused = True
+            self._paused_at = self._cursor
+            self._sync_play_buttons()
+
+    def _on_scrub_move(self, ratio: float) -> None:
+        """拖动中：只移动高亮 + 进度条，**不发声**（和快退/快进同一语义）。"""
+        if not self._play_mode or not self._scrubbing:
+            return
+        total = self._playback.duration_ms
+        head = self._play_progress.time_of(ratio)
+        self._cursor = self._playback.ordinal_at(head)
+        self._parked_ms = head  # 松手后停在这里，别弹回和弦起点
+        self._play_progress.set_progress(head, total)
+        self._sync_key_playback(head)  # 拖到哪个位置，键位就跟到哪个位置
+        self._highlight_at(self._cursor)  # 此时 _paused=True → accent-soft「定位」样式
+
+    def _on_scrub_released(self, ratio: float) -> None:
+        """松手：跳到该和弦。本来在播就接着播，本来是暂停就留在暂停态。"""
+        if not self._play_mode:
+            self._scrubbing = False
+            return
+        self._scrubbing = False
+        total_notes = len(self._tick_spans)
+        ordinal = self._playback.ordinal_at(self._play_progress.time_of(ratio))
+        self._cursor = ordinal
+        if self._scrub_was_playing:
+            self._paused = False
+            self._parked_ms = None
+            if not self._playback.play_from(ordinal):  # 重建播放器，从新位置继续
+                self._flash_status("跳转失败：谱面为空")
+            self._sync_play_buttons()
+        else:
+            self._highlight_at(ordinal)  # 留暂停态；继续播放时 _cursor != _paused_at → 会 seek
+        self._sync_progress()
+        self._progress_timer.start()
+        if total_notes:
+            self._flash_status(f"已跳到第 {ordinal + 1}/{total_notes} 个和弦")
 
     def _sync_play_buttons(self) -> None:
         """按当前状态刷新控制条：播放中显示暂停图标，暂停时才放开快退/快进。"""
@@ -2447,10 +2669,12 @@ class MainWindow(QMainWindow):
         if not self._play_mode:
             return
         if not self._paused:
+            self._parked_ms = self._playback.position_ms  # 就地冻结：进度条/键位都不许回弹
             self._playback.pause()
             self._paused = True
             self._paused_at = self._cursor
             self._sync_play_buttons()
+            self._sync_progress()
             self._highlight_at(self._cursor)  # 暂停后高亮换成 accent-soft（"定位"语义）
             total = len(self._tick_spans)
             self._flash_status(f"已暂停（{self._cursor + 1}/{total}）— 可快退/快进后继续")
@@ -2461,9 +2685,11 @@ class MainWindow(QMainWindow):
         elif not self._playback.resume():
             self._playback.play_from(self._cursor)  # 播放器已被回收 → 兜底重开
         self._paused = False
+        self._parked_ms = None
         self._paused_at = self._cursor
         self._highlight_at(self._cursor)
         self._sync_play_buttons()
+        self._sync_progress()
 
     def _step_cursor(self, delta: int) -> None:
         """暂停状态下移动高亮（只动高亮，不发声）。"""
@@ -2473,7 +2699,9 @@ class MainWindow(QMainWindow):
         if target == self._cursor:
             return
         self._cursor = target
+        self._parked_ms = self._playback.onset_of(target)  # 停在和弦起点
         self._highlight_at(target)
+        self._sync_progress()  # 暂停时进度条跟着高亮走
         total = len(self._tick_spans)
         self._flash_status(f"定位到第 {target + 1}/{total} 个和弦（点播放从这里继续）")
 
@@ -2501,6 +2729,9 @@ class MainWindow(QMainWindow):
     def _highlight_note(self, index: int) -> None:
         """播放回调：把正在播的和弦高亮并滚动到可见。"""
         if not self._play_mode:
+            return
+        if self._scrubbing:
+            # 暂停前最后一刻发出的 note_played 可能还在队列里，不能把把手拽回去
             return
         self._cursor = index
         self._highlight_at(index)

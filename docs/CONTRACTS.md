@@ -1,6 +1,6 @@
-# CONTRACTS · 接口契约 v1.37（M0 冻结 + P1/P2 加法增补）
+# CONTRACTS · 接口契约 v1.44（M0 冻结 + P1/P2 加法增补）
 
-> 状态：**v1.37**（M2 录制链路 + UI 设置 + 试听 + 路径记忆 + BetterGI 互转/yuanqin + tick 毫秒制 + 录制期只读 + 窗口尺寸/位置记忆 + chroma 判据 + 外环采样 + 判据分派修复 + 检测方式切换 + 全局采样几何与配置热重载 + 分段点采样 / weighted 判据 / 逐键基线 / 半径滑条写回 JSON + **乐器级 `sustain_ms` 延音录制 / 谱面 `[ms]` 后缀 / confirm_frames 默认 2 / 乐器级 `preview_only`（下拉可见不可选）**）。变更流程：**升版本号 → 广播受影响 owner → 同步改测试 → 本文件记变更**。
+> 状态：**v1.44**（M2 录制链路 + UI 设置 + 试听 + 路径记忆 + BetterGI 互转/yuanqin + tick 毫秒制 + 录制期只读 + 窗口尺寸/位置记忆 + chroma 判据 + 外环采样 + 判据分派修复 + 检测方式切换 + 全局采样几何与配置热重载 + 分段点采样 / weighted 判据 / 逐键基线 / 半径滑条写回 JSON + **乐器级 `sustain_ms` 延音录制 / 谱面 `[ms]` 后缀 / confirm_frames 默认 2 / 乐器级 `preview_only`（下拉可见不可选）+ **试听进度条 `PlayProgress` / 拖动跳转 / 控制器 `position_ms·duration_ms·ordinal_at`**）。变更流程：**升版本号 → 广播受影响 owner → 同步改测试 → 本文件记变更**。
 > 详细语义见 [03 · 实现规格](03-实现规格与接口契约.md)；本文只列"谁必须提供什么"。
 
 ---
@@ -33,7 +33,7 @@ class NotImplementedYet(YQRecError): ...   # M0 占位，调用即报
 | `Circle` | `x, y, r` |
 | `InstrumentSpec` | `id/name/key_count/sustain/areas/note_to_key/note_to_audio/hough/button_radius/thresholds/detection/sustain_ms/preview_only`；`note_order/key_order/area_of_key/threshold_of_key`。**v1.35**：新增 `sustain_ms:int`（0=不延音，>0=延音阈值毫秒，唯一真相）；`sustain:bool` 保留但由它归一化（旧的 `sustain:true` → `LEGACY_SUSTAIN_MS=200`） |
 | `RgbSample` | `ts, rgb(K,3)` |
-| `PressEvent` | `key, down, ts` |
+| `PressEvent` | `key, down, ts`；**v1.43**：`delta=0`（按下时的判据量 Δ，与 `KeyThreshold.delta` 同口径；抬起恒 0；不参与时间轴） |
 | `NoteEvent` | `keys, onset_ms, sustain_ms=0` |
 | `RestEvent` | `ms` |
 | `Diagnostic` | `message, offset, length, level` |
@@ -213,6 +213,8 @@ class PlaybackController(QObject):
     state_changed = Signal(str)    # "playing" / "idle"
     load(score, spec) / play() -> bool / stop() / close()
     # 首次 play 才 preload 21 个采样（同乐器复用；换乐器重建）
+    # v1.25：play_from(ordinal) / pause() / resume() / onset_of(ordinal) / paused
+    # v1.42：position_ms（播放头，暂停冻结）/ duration_ms（末音 onset+sustain）/ ordinal_at(ms)
 
 # src/yqrec/recording.py（v1.7 追加，供高亮定位）
 scan_tick_tokens(text) -> list[TickToken]   # keys / gap / start / end
@@ -258,10 +260,13 @@ yqrec record --source {screen,file,synth} [--rect L,T,W,H] [--input PATH]
 @dataclass RecordedNote: keys / onset_ms / onset_frame / gap_ms / sustain_ms
 @dataclass TickNote:     keys / gap / sustain_ms=0   # v1.35：`[ms]` 后缀
 @dataclass TickToken:    keys / gap / start / end / sustain_ms=0
-@dataclass Recording:    score / notes / frames / duration_ms / fps
+@dataclass KeySpan:      key / down_ms / up_ms / delta=0   # v1.43：逐键按下区间（**只在内存**）
+@dataclass Recording:    score / notes / frames / duration_ms / fps / spans=()
                          .tick_text -> str     # `A[800]1000F`：字母 + `[ms]` 延音 + **毫秒**间隔
+                         .press_deltas / .avg_delta / .min_delta   # v1.43：识别质量统计
 def tick_text(notes) -> str                        # 写入端（v1.12 起记毫秒；v1.35 加延音）
 def parse_tick_text(text) -> list[TickNote]        # 逆运算（字母=和弦，`[ms]`=延音，数字=间隔）
+def key_spans(presses, *, last_ts=None) -> tuple[KeySpan, ...]   # v1.43：按下/抬起配对
 
 class RecordingBuffer(spec, chord_window_ms=25.0):
     push_frame(ts)                 # 登记采集帧（worker 线程，持锁）
@@ -274,15 +279,20 @@ class RecordingBuffer(spec, chord_window_ms=25.0):
 
 # src/yqrec/scorefile.py
 TICK_UNIT_MS = "ms" ; TICK_UNIT_FRAME = "frame"
+SCORE_TYPE_TICK = "tick"                          # v1.43：顶层 "type" 的取值
+DELTA_AVG_KEY = "Average_Delta" ; DELTA_MIN_KEY = "Min_Delta"   # v1.44（"Avage_Delta" 只读兼容）
+DELTA_AVG_KEY_LEGACY = "Avage_Delta"            # v1.43 的笔误键：只读，不再写
 build_record(recording, spec, *, name, backend, extra) -> dict
-build_record_from_text(text, spec, *, fps, name, backend, extra) -> dict   # v1.12
+build_record_from_text(text, spec, *, fps, name, backend, delta_stats=None, extra) -> dict
 save_record(path, recording, spec, ...) -> Path   # 自动补 .json / 建目录 / UTF-8 不转义
-save_record_text(path, text, spec, ...) -> Path   # v1.12：文本框内容直接落盘
+save_record_text(path, text, spec, *, delta_stats=None, ...) -> Path
 load_record(path) -> dict
 record_default_dir() -> Path                      # <用户>\Documents\YQRec
 suggested_filename(prefix="谱面") -> str
 # 还原（v1.4）
 record_tick_text(record) -> str
+record_score_type(record) -> "tick" | ""          # v1.43（旧文件没有这个键）
+record_delta_stats(record) -> (avg, min)          # v1.43（旧文件/无数据 = (0, 0)）
 record_notes(record) -> list[TickNote]
 record_unit(record) -> "ms" | "frame"             # v1.12；缺省 frame（v2 及更早）
 ms_per_frame(record) -> float                     # 仅旧帧制文件用
@@ -298,11 +308,15 @@ suggested_filename(score_format="tick", *, prefix="谱面") -> str
 + `record_progress` 信号），**不接 `Session`** —— `Session` 自带捕获后端与分析线程，与预览线程并列会
 对同一区域开两份捕获、两份采样。`Session` 只服务 CLI/回归。
 
-**谱面 JSON（`version: 4`, `format: "yqrec.recording"`）**
+**谱面 JSON（`version: 5`, `format: "yqrec.recording"`, `type: "tick"`）**
 
 ```jsonc
 {
-  "version": 4, "format": "yqrec.recording", "score_format": "tick",
+  "version": 5,
+  "type": "tick",                  // v5：曲谱类型（与 BetterGI 的 type 同位置同语义）
+  "Average_Delta": 40,             // v5：本次识别所有按下的平均 Δ（整数灰阶，0 = 无识别数据）
+  "Min_Delta": 24,                 // v5：最小 Δ（最接近阈值的那一次，看余量）
+  "format": "yqrec.recording", "score_format": "tick",
   "name": "谱面_tick_20261020_1650",
   "created_at": "2026-10-20T16:50:12+08:00",
   "instrument": { "id": "fwzs", "name": "风物之诗", "key_count": 21 },
@@ -310,6 +324,12 @@ suggested_filename(score_format="tick", *, prefix="谱面") -> str
   "tick": { "unit": "ms", "text": "A[800]1000F", "sustain": true }
 }
 ```
+
+**v5（v1.43）**：`version` 后紧跟 `type` 与两个 Δ 统计（顺序固定：`version → type → Average_Delta
+→ Min_Delta`）。Δ 是**判据量**（与 `KeyThreshold.delta` 同口径）：`weighted` 取加权投影值、
+`max_drop`/`chroma` 取对应标量、旧 `channel` 模式取通道最大跌幅；取的是**确认帧**的值。
+`Average_Delta` 在 **v1.44** 更正过拼写：v1.43 曾误写成 `Avage_Delta`，写盘现在只用正确拼写；读取端（`record_delta_stats`）仍认旧键，那个窗口期存的谱面不会读不出平均 Δ。
+逐键按下区间（`KeySpan`）**不落盘**：它是试听回放用的内存数据。
 
 **v4（v1.35）**：`tick.text` 支持 `[ms]` 延音后缀；`tick.sustain` 是"这份谱面含延音"的
 标记（旧版 exe 打开 v4 文件不会报错，但会丢延音 —— 使用说明里写明延音谱面用新版打开）。
@@ -494,6 +514,10 @@ _judge_lock（只保护 detector.update/flush）；stop_recording 先 close 再 
 | **v1.32** | 2026-10-22 | **j-HDR 后端（用户要求，不影响原链路）**：① 新增 `capture/hdr_backend.py::HdrBackend`（`name="hdr"`，界面显示 `j-HDR`），用 `j-hdrcapture` 的 `Capture(timeout_ms=16)` + `grab_region(l,t,w,h)` 取帧，输出 `HxWx3 uint8 BGR`；`pick_monitor()` 要求区域完整落在**单块屏**内（跨屏拒绝，否则库会去合成整个虚拟桌面）；`InitialFrameTimeout` → 返回 None（计丢帧、不逼降级），`AccessLost`/`DimensionsChanged` → `RuntimeError`（触发回退/重建）。② `manager.FALLBACK_CHAINS` + `order_candidates()`：用户选 j-HDR 时 `hdr → dxgi → gdi`；选 dxgi 时仍是 `dxgi → gdi`（不会偷偷用 hdr）；`prefer` 为空/auto 时保持 `default_backends()` 原顺序（dxgi 仍第一）。③ `manager.BACKEND_LABELS` / `backend_label()`：内部名 `hdr` → 界面 `j-HDR`，状态栏徽标、启动/停止提示、回退提示统一走它。④ 主窗「后端」下拉加 `j-HDR` 项（`setFixedSize` 74→**88**，`j-HDR` 实测 60px + 箭头会被裁），`_backend_preference()` 白名单加 `hdr`；profile 的 `backend` 直接存 `hdr`，`findData` 可回读。⑤ `pyproject.toml` 加 `j-hdrcapture>=0.1.0`（abi3 wheel，零第三方依赖）；`build/yqrec.spec` `hiddenimports` 加 `hdrcapture`（延迟导入，不加会静默缺包）。⑥ **顺带优化 dxcam 打包**：`collect_submodules("dxcam", filter=...)` 排除 `core.winrt_duplicator` 并同步写入 `EXCLUDES`（只在 `backend="winrt"` 的函数内懒加载、依赖未安装的 winrt；实测剪除后包内已无该文件）；保留 collect 而非硬编码清单，避免 dxcam 升版漏模块又静默回退 GDI。⑦ `assets/使用说明.txt` 补 HDR 排查指引（选 j-HDR；**切 HDR / 切后端后必须重学基线**）。**明确未动**：`dxgi_backend`/`gdi_backend`/`wgc_backend`、判据与采样算法、谱面格式、默认后端。 |
 | **v1.33** | 2026-10-22 | **默认截图方式改 j-HDR + 记住选择（M3e，用户要求）**：① `AppConfig.backend` 默认 `"dxgi"` → **`"hdr"`**；`load_config()` 缺省值同步；`CaptureManager.default_backends()` 顺序改为 `[hdr, dxgi, wgc, gdi, …]`，CLI `--backend auto`（不带 prefer）也随之 hdr 优先；`_backend_preference()` / `_save_profile()` 兜底值改 `hdr`。② 下拉顺序改为 **`j-HDR`(第 0 项) / `dxgi` / `gdi`**，tooltip 同步（并注明"选择会被记住"）。③ **选择持久化**：新增 `MainWindow._on_backend_changed()` → 写 `AppConfig.backend` + `_save_app_config()`；构造下拉后按 `findData(cfg.backend)` 还原（脏值/空值回落 `hdr`）。④ **标定档不再覆盖后端**：`_load_profile()` 里 `findData(profile.backend)` 整段删除 —— 标定档只记录标定当时用了什么，覆盖会让用户每次启动被拽回旧值。⑤ `CONFIG_VERSION 3 → 4`：`_migrate()` 新增 v3→v4 把 `backend` 强制置 `hdr`（v4 之前 UI 从不回写该字段，档里的 `dxgi` 只是序列化出来的默认值，不是用户选择；不迁移则"改默认"对已有档完全无效）。**未动**：判据/采样算法、谱面格式、`hdr_backend`/`dxgi_backend` 实现、回退链语义。 |
 | **v1.34** | 2026-10-22 | **首次运行建档 + 打包日志修复（M3f，用户报告关闭按钮置灰）**：① `MainWindow.__init__` 末尾（`_load_profile()` 之后）新增 `if not config_path().exists(): self._save_app_config()` —— 把首次运行的 `mkdir %APPDATA%\YQ_moTools + 新建 settings.json` 提前到 `show()` 之前，消除窗口可见后唯一一次首次运行主线程写盘（窗口几何 400ms 防抖触发），根除杀软实时扫描下卡主线程 >5s 触发 Windows ghost 窗口（标题栏 X 被系统置灰的唯一机制）；防抖落盘此后因「值没变」跳过。② `app._log_dir()` 相对导入 `from .config import …` 改**绝对导入**：frozen 下 `app.py` 以 `__main__`（无父包）运行，相对导入 ImportError 被 `run_gui()` 的 `except Exception` 静默吞掉 → **打包版文件日志从未装上过**（真实机数据目录无 `logs/` 即铁证）；except 分支补 traceback 留档 `%TEMP%\yqrec_log_fail.txt`。③ `cli.main()` 对 `gui` 子命令跳过无目录的 `setup_logging()`（否则 `_configured` 置位、`run_gui` 幂等跳过、文件 handler 永远装不上）。**未动**：判据/采样算法、谱面格式、配置文件 schema、后端实现。规矩沉淀见 03 §17。 |
+| **v1.44** | 2026-10-23 | **键名更正 `Avage_Delta` → `Average_Delta`（用户确认）**：v1.43 落地时按用户原话保留了笔误拼写，用户看到后要求按建议改正。① 写盘键名改为 **`Average_Delta`**（`DELTA_AVG_KEY`），位置不变（紧跟 `type`）；② 新增 **`DELTA_AVG_KEY_LEGACY = "Avage_Delta"` 只读兼容** —— `record_delta_stats()` 在新键缺省时回退旧键，v1.43 那半天存过的谱面仍能读出平均 Δ；③ 键顺序（`version → type → Average_Delta → Min_Delta`）、`Min_Delta` 语义、Δ 口径、JSON 版本号（仍是 v5）一概不动。**未动**：识别算法、tick 文本、试听回放、BGI 互转。 |
+| **v1.43** | 2026-10-23 | **tick 谱面加类型与识别质量统计 + 试听回放键位（M2q.11，用户四项要求）**：① 顶层 `version` 后紧跟 **`"type": "tick"`**（与 BetterGI 曲谱的 `type` 同位置同语义，一眼看出文件类型）；② 新增 **`"Avage_Delta"`**（本次识别所有按下的平均 Δ）与紧随其后的 **`"Min_Delta"`**（最小 Δ），值是四舍五入的整数灰阶，`RECORD_VERSION 4→5`；键名**按用户指定拼写**（`Avage` 是 `Average` 的笔误，不改，已有脚本按它对账），常量 `DELTA_AVG_KEY / DELTA_MIN_KEY` 全仓唯一。③ Δ 来源：`PressEvent` 新增 `delta` 字段（**按下时的判据量**，`PressDetector._signals` 现在把标量值一起返回；`weighted`/`max_drop`/`chroma`/`euclid` 各取本模式标量，旧 `channel` 模式用通道最大跌幅），抬起事件恒 0、不参与时间轴。④ 新增 `recording.KeySpan(key/down_ms/up_ms/delta)` + `Recording.spans`（**只在内存，不落盘**）+ `press_deltas/avg_delta/min_delta`；`RecordingBuffer.finish()` 顺手配对出区间（未闭合的按下按最后一帧闭合）。⑤ 试听**刚录的谱面**时，40ms 心跳按 `spans` 点亮键位灯（含按下/弹起时刻与按下时的 Δ；无画面 → RGB 显示 `—/—/—`），读取的文件没有这份数据也不影响；文本一改 / 读文件 / 换乐器即失效（判据是 `_playback_score is recording.score`）。⑥ 顺带修「暂停回弹」：新增 `_parked_ms`，暂停/拖动/快进快退后进度条停在真实时刻，不再跳回和弦起点。**未动**：tick 文本语法、`NoteEvent`、识别判据公式、BGI 互转、采样几何。 |
+| **v1.42** | 2026-10-23 | **试听进度条 + 拖动跳转（M2q.10，用户要求「播放组件左侧显示实时进度，可拖动跳跃」）**：① 新增 `ui/widgets.py::PlaybackProgress`（自绘 4px 轨道 + accent 填充 + 悬停放大的把手；18px 高、`NoFocus`、左右各留一个把手半径让 0%/100% 都点得到；`total==0` 不响应鼠标），**只发信号不含业务**：`scrub_started()` / `scrubbed(ratio)` / `seek_released(ratio)` + `set_progress(head_ms, total_ms)` / `reset()` / `fraction()` / `time_of(ratio)` / `refresh_style()`。② `PlaybackController` 新增进度数据源 **`position_ms`**（锚点 `perf_counter()` + 起播 ms，只在控制器留一份；暂停用 `_frozen_ms` 冻结、`resume()` 从冻结处接着算）、**`duration_ms`**（末音 `onset + sustain`，≥1.0）、**`ordinal_at(ms)`**（bisect，+0.5ms 容差）—— UI 每 40ms 读一次自己画，不另记锚点。③ 主窗：`_progress_timer`（`PROGRESS_TICK_MS=40`）刷新；`_play_spacer` 平时 `Expanding`、试听时改 `Minimum` 把留白让给进度条；**按下先 `pause()` 再拖**（否则定时器把把手拽回去）；拖动只改 `_cursor` + 高亮（accent-soft 定位样式）不发声；松手在播就 `play_from(新和弦)` 续播、本来暂停就留在暂停态（`_paused_at` 不动，点播放时自动 seek）；暂停态进度条跟 `onset_of(_cursor)` 走而不是冻结播放头。④ 退出试听模式停表 + `reset()` + 还原 spacer。**未动**：识别算法、谱面格式、`Player`/`AudioEngine`、快退快进语义、窗口默认尺寸。 |
+| **v1.42** | 2026-10-23 | **注入可诊断化（用户报"日志有点击记录但游戏没反应"）**：① 新增 `inputsim.process_name()/window_process()/window_title()/describe()/foreground_window()` —— 日志里现在直接写"打到谁身上"：`注入目标: 0x1059a msedge.exe「…bilibili…」 @ (727,584)`、`录制启动空格注入: 目标 … → 前台 …`。用户当时那句 `窗口 0x1059a` 实际是 **Edge**（最大化盖住主屏），`SendInput` 完全成功、只是没打给游戏。② 新增 `inputsim.is_elevated()/injection_hint()`：目标提权而本程序没提权时提示"UIPI 会静默丢弃注入"（消息区 warn + 日志）。③ `press_space()` 改发**扫描码**（`KEYEVENTF_SCANCODE + MapVirtualKeyW`）—— DirectInput/RawInput 的游戏常常只认扫描码，VK-only 可能被无视；`use_scan_code=False` 可退回旧行为。④ **修 64 位 bug**：`activate_window()` 强提兜底分支用了 `user32.GetWindowLong`（64 位无此导出，只有 `GetWindowLongPtrW`）→ 走到兜底必 AttributeError；改 `_get_window_long()`。⑤ 模式 2（点击）先尝试激活该点窗口再点（后台窗口第一下点击常被吞）。**未动**：`record_click` 语义、识别算法、谱面格式。 |
 | **v1.41** | 2026-10-23 | **存档路径可配置 + 消息区气泡（M4e，用户三项要求）**：① `assets/instruments.json` 新增全局键 **`archive_path`**（字符串）：`"Local"` = `<exe目录>\data`、`"Temp"` = `%APPDATA%\YQ_moTools`（**写不进去自动降级 Local**）、其他 = 绝对路径（`%VAR%`/`~` 展开，相对路径非法回落默认）；`config.data_dir()` 顺序改为 `YQREC_DATA_DIR` → `archive_path` → 默认 `%APPDATA%`；新增 `config.archive_setting()/archive_path_dir()/exe_dir()/local_data_dir()`，`instruments.load_archive_path()`。② **去掉弹窗**：存档写不进去只在窗口最下方消息区给一句短提示，完整原因（配置值/目标/错误/实际位置）进悬浮气泡与日志（`_ensure_writable_data_dir()` 改为返回 `(短句, 详情)`）。③ 消息区（Toast）**过长内容悬停弹气泡显示全文**：`_toast(message, tone, detail=)` + `_toast_tooltip()`（按字体实测宽度判断是否截断）+ `_wrap_tooltip()`（`textwrap` 折行，Qt 纯文本 tooltip 不自动折行）；超时清空时连气泡一起清。**未动**：识别算法、谱面格式、`record_click` 语义。 |
 | **v1.40** | 2026-10-23 | **启动把 cwd 挪出程序目录（用户问"debug.log 是怎么来的"）**：`debug.log` **不是本程序的产物** —— 它是搜狗输入法写在自己宿主进程**当前工作目录**里的调试日志（内容 `sgime_skin.vN.filemap.sogouime` / `KernelParameterSetter … scheme=Sogou`）。新增 `app._detach_cwd()`：启动早期（Qt 之前）把 cwd 迁到 `%TEMP%\yqrec-cwd`（只认绝对路径的 TEMP/TMP/TMPDIR，都不可用就不动），让 IME 的日志落在临时目录而不是交付目录。本程序所有路径均自算绝对路径（数据目录 / `YQREC_ASSETS` / 谱面默认目录 / 主题缓存），挪 cwd 无副作用。**未动**：日志内容与格式、`record_click`、识别算法、谱面格式。 |
 | **v1.39** | 2026-10-23 | **存档目录"真写一次"自检 + 可写兜底（用户报"新包仍读不到存档修改、日志没有今天的记录"）**：① `config.probe_writable(path)`：在目标目录实际建/删一个 `.write_probe_*` 文件，返回错误说明或 None —— 只查 ACL 会得出"一切正常"的假结论（实测 ACL 是 `Administrator:(F)`、PowerShell 能写，某些进程 `open(...,'a')` 仍 `PermissionError`）。② `app._ensure_writable_data_dir()`：启动先探 `data_dir()`，不可写就依次试 `<exe>/data`、`%LOCALAPPDATA%\YQ_moTools`，命中就设 `YQREC_DATA_DIR`（**全进程视图一致**：设置/标定/日志一起搬过去）；一个都不可写则返回失败说明。③ `MainWindow.show_startup_diagnostics(note=)`：有任何写盘异常时**弹模态对话框**（路径 + 原因 + 兜底位置 + 三条处置建议），不再只靠消息区小字。④ `_report_paths()` 多写一行 `路径[乐器配置] = ...（record_click=N）`。**未动**：识别算法、谱面格式、`record_click` 语义、后端实现。 |

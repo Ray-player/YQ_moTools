@@ -16,10 +16,22 @@ ctl.play()                  # = play_from(0)
 ctl.play_from(ordinal)      # 从第 N 个和弦开始（试听里「从当前高亮继续」）
 ctl.pause() / ctl.resume()  # 暂停 / 从暂停处继续（内部走 Player 的 pause 语义）
 ctl.stop() / ctl.close()
+
+# 进度（M2q.10）：UI 每 40ms 读一次，播放头由这里算，UI 只管画
+ctl.position_ms             # 播放头绝对时刻；播放中随时间前进，暂停时冻结
+ctl.duration_ms             # 全曲总长（末音 onset + 延音）
+ctl.ordinal_at(ms)          # 毫秒 → 和弦下标（拖进度条跳转用）
 ```
+
+**为什么播放头在控制器里算**：`Player` 在后台线程按绝对时间表走，主线程没有"现在几毫秒"
+这个量；若 UI 自己记锚点，`pause → resume`（引擎内部按暂停时长顺延 `t0`）与 `play_from`
+（重建播放器）两处都要跟着重算，容易偏。锚点只在控制器维护一份。
 """
 
 from __future__ import annotations
+
+import bisect
+import time
 
 from PySide6.QtCore import QObject, Signal
 
@@ -62,6 +74,13 @@ class PlaybackController(QObject):
         `Player` 回调给的是 **events 下标**（含休止），而 tick 文本 token 只数和弦，
         这里做一次换算，UI 才能直接按 token 下标高亮。
         """
+        self._anchor_ms = 0.0
+        """起播时刻（绝对 ms，相对曲首）。"""
+        self._anchor_at = 0.0
+        """起播那一刻的 `perf_counter()`；播放头 = `_anchor_ms + (now - _anchor_at) * 1000`。"""
+        self._frozen_ms: float | None = None
+        """暂停时冻结的播放头（`None` = 没暂停）。暂停期间不能用公式算 —— 引擎的 `t0`
+        要等 resume 时才顺延，直接用 `perf_counter()` 会让进度条一直往前爬。"""
 
     # -- 状态 -------------------------------------------------------------- #
 
@@ -96,6 +115,49 @@ class PlaybackController(QObject):
     @property
     def ready(self) -> bool:
         return self._score is not None and self._spec is not None and bool(self._score.events)
+
+    # -- 进度（M2q.10） ------------------------------------------------------ #
+
+    @property
+    def duration_ms(self) -> float:
+        """全曲总长：末音 `onset + sustain`（末音是延音时进度条不会提前满格）。
+
+        至少 1.0，调用方做除法不用再判零。
+        """
+        notes = self.notes()
+        if not notes:
+            return 0.0
+        last = notes[-1]
+        return max(1.0, float(last.onset_ms) + max(0.0, float(last.sustain_ms)))
+
+    @property
+    def position_ms(self) -> float:
+        """播放头绝对时刻（ms）。播放中随时间前进；暂停冻结；停止后回起播点。"""
+        if self._frozen_ms is not None:
+            return self._frozen_ms
+        if not self.playing:
+            return self._anchor_ms
+        speed = self._player.speed if self._player is not None else 1.0
+        elapsed = max(0.0, time.perf_counter() - self._anchor_at)
+        return min(self._anchor_ms + elapsed * 1000.0 * speed, self.duration_ms)
+
+    def ordinal_at(self, ms: float) -> int:
+        """毫秒 → 和弦下标（"最后一个已经开始的音"）；越界夹到首/尾。
+
+        `+0.5ms` 是给浮点误差留的余量：拖到正好 `onset` 上时要落在**这个**音，不是前一个。
+        """
+        notes = self.notes()
+        if not notes:
+            return 0
+        onsets = [float(n.onset_ms) for n in notes]
+        index = bisect.bisect_right(onsets, float(ms) + 0.5) - 1
+        return max(0, min(index, len(notes) - 1))
+
+    def _anchor(self, ms: float) -> None:
+        """把播放头锚到 `ms`（起播/seek 后调用）。"""
+        self._anchor_ms = max(0.0, float(ms))
+        self._anchor_at = time.perf_counter()
+        self._frozen_ms = None
 
     # -- 装载 -------------------------------------------------------------- #
 
@@ -153,22 +215,28 @@ class PlaybackController(QObject):
         finally:
             self._suppress_state = False
         player.play(float(notes[ordinal].onset_ms))  # 解除抑制后再起播，UI 才收得到 playing
+        self._anchor(float(notes[ordinal].onset_ms))  # 进度条从这一帧重新起算
         return True
 
     def pause(self) -> None:
         """暂停（时间轴冻结，`resume()` 从原位置继续）。"""
         if self._player is not None:
+            self._frozen_ms = self.position_ms  # 必须在 pause() 之前取：之后状态就不是 playing 了
             self._player.pause()
 
     def resume(self) -> bool:
         """从暂停处继续（不重建播放器，音频无缝）。"""
         if self._player is None or self._player.state is not PlayerState.PAUSED:
             return False
+        frozen = self._frozen_ms
         self._player.play()  # Player 在 PAUSED 时走 clear pause 分支
+        self._anchor(frozen if frozen is not None else self._anchor_ms)  # 接着冻结处继续算
         return True
 
     def stop(self, *, emit_state: bool = True) -> None:
         """停止并释放播放器。`emit_state=False` 用于"内部换播放器"（别让 UI 以为试听结束）。"""
+        self._frozen_ms = None
+        self._anchor_ms = 0.0
         player, self._player = self._player, None
         if player is None:
             return

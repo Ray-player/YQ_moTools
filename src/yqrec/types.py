@@ -528,6 +528,12 @@ class PressEvent:
     key: str
     down: bool
     ts: float
+    delta: float = 0.0
+    """这次按下的**判据量**（Δ，与 `KeyThreshold.delta` 同口径、同单位）。
+
+    只给"谱面自校验"（平均/最小 Δ）与试听回放显示用，**不参与时间轴**：
+    抬起事件、`flush()` 补发的抬起都是 0。非录制来源的谱面没有这个值（0）。
+    """
 
 
 @dataclass(frozen=True, slots=True)
