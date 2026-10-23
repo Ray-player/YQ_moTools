@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import sys
+import textwrap
 import time
 from pathlib import Path
 from typing import Any
@@ -178,6 +179,24 @@ def _mmss(milliseconds: float) -> str:
     """毫秒 → `0:05`（录制区头部的紧凑时长；完整的秒数/fps 留在 tooltip）。"""
     total = max(0, int(round(milliseconds / 1000.0)))
     return f"{total // 60}:{total % 60:02d}"
+
+
+TOOLTIP_WRAP_COLUMNS = 46
+"""悬浮气泡每行最多多少字符（中文一个字按 1 计；46 ≈ 一屏宽度的三分之一，读起来不费劲）。"""
+
+
+def _wrap_tooltip(text: str, columns: int = TOOLTIP_WRAP_COLUMNS) -> str:
+    """把长文本按列宽折行（保留原有换行），给消息区的悬浮气泡用。
+
+    Qt 的 tooltip 对纯文本不会自动折行（只会在屏幕边缘硬截），所以必须自己插换行。
+    """
+    wrapped: list[str] = []
+    for line in text.splitlines():
+        if not line.strip():
+            wrapped.append("")
+            continue
+        wrapped.extend(textwrap.wrap(line, columns) or [line])
+    return "\n".join(wrapped).strip("\n")
 
 
 class MainWindow(QMainWindow):
@@ -768,20 +787,46 @@ class MainWindow(QMainWindow):
             return f"{fps:.1f} fps · {frames} 帧"
         return f"{fps:.1f} fps"
 
-    def _toast(self, message: str, tone: str = "info") -> None:
-        """统一消息区：`info` / `warn` / `error` 三种语气，同一位置，超时清空。"""
+    def _toast(self, message: str, tone: str = "info", *, detail: str = "") -> None:
+        """统一消息区：`info` / `warn` / `error` 三种语气，同一位置，超时清空。
+
+        消息区只有 260px，长文本会被截断 → 悬停时用气泡显示完整内容（自动折行）。
+        `detail` 用于"一句话说不完"的场景（例如存档路径 / 失败原因），给气泡与提示用。
+        """
         self._lbl_toast.setProperty("tone", tone)
         theme.repolish(self._lbl_toast)
         self._lbl_toast.setText(message)
-        self._lbl_toast.setToolTip(message)
+        self._lbl_toast.setToolTip(self._toast_tooltip(message, detail))
         if self._error_timer is None:
             self._error_timer = QTimer(self)
             self._error_timer.setSingleShot(True)
-            self._error_timer.timeout.connect(lambda: self._lbl_toast.setText(""))
+            self._error_timer.timeout.connect(self._clear_toast)
         self._error_timer.stop()
         if not message:
             return
         self._error_timer.start(ERROR_CLEAR_MS if tone != "error" else ERROR_CLEAR_MS + 2000)
+
+    def _clear_toast(self) -> None:
+        """清空消息区（连气泡一起清，免得鼠标停在空位置还弹出旧内容）。"""
+        self._lbl_toast.setText("")
+        self._lbl_toast.setToolTip("")
+
+    def _toast_tooltip(self, message: str, detail: str = "") -> str:
+        """消息区被截断时才给悬浮气泡；`detail` 非空则无条件给（内容比一行多）。
+
+        判断"是否被截断"用字体实测宽度对比标签可用宽度 —— 中英文混排时按字数估会错。
+        """
+        text = detail or message
+        if not text:
+            return ""
+        if not detail:
+            metrics = self._lbl_toast.fontMetrics()
+            widest = max(
+                (metrics.horizontalAdvance(line) for line in message.splitlines()), default=0
+            )
+            if widest <= max(self._lbl_toast.maximumWidth() - 12, 40):
+                return ""
+        return _wrap_tooltip(text)
 
     def _delta(self) -> int:
         """灵敏度 Δ 固定在乐器 JSON 的 `delta` 字段里，界面不再暴露滑条。"""
@@ -2518,27 +2563,28 @@ class MainWindow(QMainWindow):
             self._set_error(f"保存设置失败：{exc}")
 
     def show_startup_diagnostics(
-        self, *, rows: list[tuple[str, object]], log_failed: bool, note: str = ""
+        self,
+        *,
+        rows: list[tuple[str, object]],
+        log_failed: bool,
+        note: str = "",
+        detail: str = "",
     ) -> None:
-        """启动自检：把"设置 / 标定 / 日志到底落在哪"挂到消息区提示里，写不了就弹窗报。
+        """启动自检：路径每次进日志；存档写不了只在**窗口最下方消息区**提示（不弹窗）。
 
-        背景（2026-10-23 用户实机）：`%APPDATA%` 写不进去时，旧版会把失败压成一行 warning，
+        背景（2026-10-23 用户实机）：`%APPDATA%` 写不进去时，旧版把失败压成一行 warning，
         而那行 warning 恰恰也写不进磁盘 —— 用户只能看到"窗口大小和乐器每次都被拽回旧值"。
-        现在路径每次都进日志，写不进去就**弹窗**（消息区那条小提示用户容易错过）。
+        现在路径全部进日志；界面上只留一句短提示 + 悬浮气泡看完整原因（用户明确要求不弹窗）。
         """
         self._startup_paths = [(label, str(path)) for label, path in rows]
-        detail = "\n".join(f"{label}: {path}" for label, path in self._startup_paths)
-        self._lbl_toast.setToolTip(detail)
+        paths = "\n".join(f"{label}: {path}" for label, path in self._startup_paths)
         if log_failed and not note:
-            note = "日志文件装不上（未能写入存档目录），设置/标定也可能存不下来。"
+            note = "日志文件装不上，设置/标定也可能存不下来（悬停看详情）"
+            detail = detail or "文件日志没能装到存档目录的 logs/ 下。"
         if not note:
+            self._lbl_toast.setToolTip("")  # 一切正常：不挂气泡，免得鼠标乱弹
             return
-        self._toast("存档目录写入异常，详见弹窗（鼠标悬停可看全部路径）", "error")
-        QMessageBox.warning(
-            self,
-            "存档目录写入异常",
-            f"{note}\n\n当前实际使用的位置：\n{detail}",
-        )
+        self._toast(note, "error" if log_failed else "warn", detail=f"{detail}\n\n{paths}")
 
     # -- 窗口尺寸记忆（用户要求：缩放过就沿用上次大小） -------------------- #
 

@@ -49,6 +49,57 @@ def test_probe_writable_detects_bad_dir(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 1b. `archive_path`（instruments.json 里的存档路径开关）
+# --------------------------------------------------------------------------- #
+def _use_archive_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: object) -> None:
+    """把 `YQREC_ASSETS` 指到一个只含 archive_path 的最小 instruments.json。"""
+    assets = tmp_path / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    (assets / "instruments.json").write_text(
+        json.dumps({"archive_path": value}, ensure_ascii=False), encoding="utf-8"
+    )
+    monkeypatch.setenv("YQREC_ASSETS", str(assets))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.delenv("YQREC_DATA_DIR", raising=False)
+
+
+def test_archive_path_local_goes_next_to_exe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`Local` → `<exe目录>/data`（源码运行时 = 项目根/data）。"""
+    from yqrec.config import exe_dir, local_data_dir
+
+    _use_archive_path(monkeypatch, tmp_path, "Local")
+    assert data_dir() == exe_dir() / "data" == local_data_dir()
+
+
+def test_archive_path_temp_goes_to_appdata(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`Temp` → `%APPDATA%\\YQ_moTools`（降级逻辑在 app 层，这里只验解析）。"""
+    _use_archive_path(monkeypatch, tmp_path, "Temp")
+    assert data_dir() == tmp_path / "roaming" / DATA_DIR_NAME
+
+
+def test_archive_path_absolute_is_used_as_is(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """绝对路径直接用（不再拼 `YQ_moTools` 子目录）。"""
+    target = tmp_path / "my_save"
+    _use_archive_path(monkeypatch, tmp_path, str(target))
+    assert data_dir() == target
+
+
+def test_archive_path_relative_is_ignored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """相对路径/空串视为非法 → 回落默认 %APPDATA%（绝不写到 cwd）。"""
+    _use_archive_path(monkeypatch, tmp_path, "relative/save")
+    assert data_dir() == tmp_path / "roaming" / DATA_DIR_NAME
+    _use_archive_path(monkeypatch, tmp_path, "")
+    assert data_dir() == tmp_path / "roaming" / DATA_DIR_NAME
+
+
+def test_archive_path_env_override_still_wins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`YQREC_DATA_DIR` 优先级高于 archive_path（测试隔离 / 自动降级都靠它）。"""
+    _use_archive_path(monkeypatch, tmp_path, "Local")
+    monkeypatch.setenv("YQREC_DATA_DIR", str(tmp_path / "forced"))
+    assert data_dir() == tmp_path / "forced"
+
+
+# --------------------------------------------------------------------------- #
 # 2. 乐器选择持久化
 # --------------------------------------------------------------------------- #
 @pytest.fixture()
@@ -131,5 +182,77 @@ def test_old_settings_without_instrument_follows_profile(make_window) -> None:
     window = MainWindow()
     assert window._spec.id == "ljdsq"
     assert window._baseline is not None, "老用户的标定不能因为加了这个字段就丢"
+    window.close()
+    app.processEvents()
+
+
+# --------------------------------------------------------------------------- #
+# 3. 消息区（窗口最下方）的过长日志 → 悬浮气泡显示完整内容
+# --------------------------------------------------------------------------- #
+def test_long_toast_gets_wrapped_tooltip(make_window) -> None:
+    """超过 260px 的消息要挂气泡，并把长行折开（Qt 纯文本 tooltip 不会自己折行）。"""
+    app, _tmp = make_window
+    from yqrec.ui.main_window import MainWindow
+
+    window = MainWindow()
+    message = "存档写不进 C 盘，已改用 data 目录" * 6
+    window._toast(message, "warn")
+    app.processEvents()
+    tip = window._lbl_toast.toolTip()
+    assert tip, "长消息必须有悬浮气泡"
+    assert "\n" in tip, "气泡内容要折行，否则仍是一长条"
+    # 折行会吃掉断点处的空格，比较时忽略空白即可（内容本身不能丢字）
+    assert message.replace(" ", "") in tip.replace("\n", "").replace(" ", "")
+    window.close()
+    app.processEvents()
+
+
+def test_short_toast_has_no_tooltip(make_window) -> None:
+    """放得下的短消息不挂气泡（避免鼠标一停就弹）。"""
+    app, _tmp = make_window
+    from yqrec.ui.main_window import MainWindow
+
+    window = MainWindow()
+    window._toast("已保存", "info")
+    app.processEvents()
+    assert window._lbl_toast.toolTip() == ""
+    window.close()
+    app.processEvents()
+
+
+def test_toast_detail_forces_tooltip(make_window) -> None:
+    """短句 + detail（例如失败原因）→ 气泡给 detail，消息区只留短句。"""
+    app, _tmp = make_window
+    from yqrec.ui.main_window import MainWindow
+
+    window = MainWindow()
+    window._toast("存档不可写", "warn", detail="原因：PermissionError: 拒绝访问")
+    app.processEvents()
+    assert window._lbl_toast.text() == "存档不可写"
+    assert "PermissionError" in window._lbl_toast.toolTip()
+    window.close()
+    app.processEvents()
+
+
+def test_startup_diagnostics_does_not_pop_dialog(make_window, monkeypatch) -> None:
+    """存档写不进去时**不弹窗**，只在消息区给提示（用户明确要求）。"""
+    app, _tmp = make_window
+    import yqrec.ui.main_window as mw
+
+    def _boom(*_args, **_kwargs):  # 弹窗被调到就说明违反了要求
+        raise AssertionError("不应该弹 QMessageBox")
+
+    monkeypatch.setattr(mw.QMessageBox, "warning", _boom)
+
+    window = mw.MainWindow()
+    window.show_startup_diagnostics(
+        rows=[("数据目录", "E:/tmp/data")],
+        log_failed=False,
+        note="存档写不进 C 盘，已改用 data 目录（悬停看详情）",
+        detail="原因：PermissionError: [WinError 5] 拒绝访问",
+    )
+    app.processEvents()
+    assert window._lbl_toast.text().startswith("存档写不进 C 盘")
+    assert "WinError 5" in window._lbl_toast.toolTip()
     window.close()
     app.processEvents()

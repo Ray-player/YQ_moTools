@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .logging import get_logger
 from .types import CaptureTarget, KeyGrid, KeyThreshold, Profile, target_from_dict
 
 CONFIG_VERSION = 4
@@ -150,6 +151,17 @@ r"""数据目录名（`%APPDATA%\YQ_moTools`、`<文档>\YQ_moTools`）。
 用户明确表示"重新标定一次就行"，所以 `M3b.1` 直接删掉了旧目录。
 """
 
+ARCHIVE_LOCAL = "local"
+"""`archive_path` 的 `Local`：存档放 `<exe目录>\\data`（便携、不碰 C 盘）。"""
+
+ARCHIVE_APPDATA = "temp"
+"""`archive_path` 的 `Temp`：存档放 `%APPDATA%\\YQ_moTools`（写不进来自动降级 Local）。"""
+
+_APPDATA_ALIASES = (ARCHIVE_APPDATA, "appdata", "default", "roaming")
+"""`Temp` 这一档的别名（用户手写 `AppData` / 默认档也认）。"""
+
+_log = get_logger("config")
+
 
 def _env_dir(name: str) -> Path | None:
     """读一个环境变量当目录用；**非绝对路径一律不认**（返回 None）。
@@ -222,20 +234,76 @@ def probe_writable(path: Path | str) -> str | None:
 
 
 def data_dir() -> Path:
-    r"""数据目录（**绝对路径**，`%APPDATA%\YQ_moTools`）：设置 / 标定 / 日志都在它下面。
+    r"""数据目录（**绝对路径**）：设置 / 标定 / 日志都在它下面。
 
-    解析顺序：`YQREC_DATA_DIR`（显式覆盖，测试与便携版用）→ `APPDATA` →
-    注册表的 User Shell Folders → `<主目录>\AppData\Roaming`。
-    与旧实现（`os.environ.get("APPDATA") or Path.home()`）的区别：任何一步拿到相对路径都
-    视为无效，继续往下找，最终仍失败就抛 `RuntimeError` —— 绝不让数据落到 cwd。
+    解析顺序：
+    1. `YQREC_DATA_DIR`（显式覆盖：测试、便携版、自动降级都用它）；
+    2. `assets/instruments.json` 的 **`archive_path`**（用户可配置）：
+       `"Local"` → `<exe目录>\data`；`"Temp"` → `%APPDATA%\YQ_moTools`；其他 = 绝对路径；
+    3. 默认 `%APPDATA%\YQ_moTools`，其中 `%APPDATA%` 拿不到就退注册表、再退主目录。
+
+    任何一步拿到相对路径都视为无效继续往下找，最终仍失败就抛 `RuntimeError` ——
+    绝不让数据落到 cwd（否则日志/设置会写进 exe 所在目录）。
     """
     override = _env_dir("YQREC_DATA_DIR")
     if override is not None:
         return override
+    custom = archive_path_dir()
+    if custom is not None:
+        return custom
+    return _roaming_dir() / DATA_DIR_NAME
+
+
+def exe_dir() -> Path:
+    """程序所在目录：打包后是 exe 目录，源码运行是项目根（`Local` 档的基准）。"""
+    import sys
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+def local_data_dir() -> Path:
+    """`archive_path = "Local"` 的目标：`<exe目录>\\data`（便携、不碰 C 盘）。"""
+    return exe_dir() / "data"
+
+
+def _roaming_dir() -> Path:
+    """`%APPDATA%`（拿不到就退注册表、再退 `<主目录>\\AppData\\Roaming`）。"""
     roaming = _env_dir("APPDATA") or _roaming_from_registry()
     if roaming is None:
         roaming = _home_dir() / "AppData" / "Roaming"
-    return roaming / DATA_DIR_NAME
+    return roaming
+
+
+def archive_setting() -> str:
+    """`assets/instruments.json` 的 `archive_path` 原值（读不到返回空串）。"""
+    try:
+        from .instruments import load_archive_path  # 延迟导入：instruments 依赖 types，避免顶层环
+
+        return load_archive_path()
+    except Exception as exc:  # pragma: no cover - 极端情况（文件被删/JSON 坏）
+        _log.warning("读取 archive_path 失败（%s），按默认存档位置处理", exc)
+        return ""
+
+
+def archive_path_dir(setting: str | None = None) -> Path | None:
+    """把 `archive_path` 解析成目录；未配置 / 非法返回 None（= 走默认 %APPDATA%）。"""
+    raw = archive_setting() if setting is None else setting
+    raw = (raw or "").strip().strip('"')
+    if not raw:
+        return None
+    text = os.path.expandvars(os.path.expanduser(raw))
+    key = text.strip().lower()
+    if key == ARCHIVE_LOCAL:
+        return local_data_dir()
+    if key in _APPDATA_ALIASES:
+        return _roaming_dir() / DATA_DIR_NAME
+    path = Path(text)
+    if path.is_absolute():
+        return path
+    _log.warning("archive_path=%r 既不是 Local/Temp 也不是绝对路径，按默认位置处理", raw)
+    return None
 
 
 def config_dir() -> Path:

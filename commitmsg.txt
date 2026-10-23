@@ -1,0 +1,26 @@
+feat(M4e): 存档路径可用 instruments.json 配置；写不进 C 盘不弹窗；消息区长文本悬停看全文
+
+用户三项要求：
+
+1) `assets/instruments.json` 新增全局键 `archive_path`（字符串）控制存档根目录：
+   - `"Local"` → `<exe目录>\data`（便携、不碰 C 盘）
+   - `"Temp"`  → `%APPDATA%\YQ_moTools`，**写不进去自动降级 Local**
+   - 其他      → 绝对路径（`%VAR%` / `~` 展开；相对路径视为非法回落默认）
+   `config.data_dir()` 解析链：`YQREC_DATA_DIR`（环境变量，测试/降级用）→ `archive_path`
+   → 默认 %APPDATA%（退注册表 → 主目录，绝不退 cwd）。新增
+   `config.archive_setting()/archive_path_dir()/exe_dir()/local_data_dir()` 与
+   `instruments.load_archive_path()`；启动日志多一行 `路径[存档配置]`。
+   只在启动时读一次（路径换了 settings/profile 得整体搬，不适合 F5 热更）。
+
+2) 存档写 C 盘失败时**不再弹窗**：`_ensure_writable_data_dir()` 改为返回 (短句, 详情)，
+   短句进窗口最下方消息区，详情（配置值/目标目录/错误/实际位置/处置建议）进悬浮气泡与日志。
+   `show_startup_diagnostics()` 里的 QMessageBox 整段删除。
+
+3) 消息区（Toast）过长内容支持悬停气泡看全文：`_toast(msg, tone, detail=)` +
+   `_toast_tooltip()`（按字体实测宽度判断是否被截断）+ `_wrap_tooltip()`（textwrap 折行——
+   Qt 纯文本 tooltip 不会自动折行）；超时清空时连气泡一起清（`_clear_toast`）。
+
+顺带：`_fallback_candidates()` 复用 `config.local_data_dir()`（降级第一档就是 Local）。
+新增 9 条测试（5 条 archive_path 解析 + 4 条气泡/不弹窗）。契约 v1.41。
+实机冒烟：Temp 不可写 → 自动落 data 并只出消息区提示；Local → 直接 data；绝对路径 →
+按给定目录建档。

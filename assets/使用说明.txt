@@ -70,7 +70,9 @@
   改成 1 = 看到就认，但动画闪一下也可能被当成按下）。
 
 【文件位置】
-· 设置与标定：%APPDATA%\YQ_moTools\（写不进去时自动改存 程序目录\data\，启动会弹窗说明）
+· 存档位置由 _internal\assets\instruments.json 的 "archive_path" 决定（改完要重启程序）：
+  "Temp"（默认）= %APPDATA%\YQ_moTools；"Local" = 程序目录\data；也可以直接填绝对路径。
+  写不进去时会自动改用 程序目录\data，窗口最下方会有一行提示（鼠标悬停看完整原因）。
 · 默认谱面目录：文档\YQ_moTools\
 · 识别参数：程序目录\_internal\assets\instruments.json
 · 程序目录里如果出现 debug.log：那是**搜狗输入法**写的（内容和本程序无关，可随时删）。

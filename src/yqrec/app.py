@@ -111,49 +111,58 @@ def _file_log_path() -> str:
 
 
 def _fallback_candidates() -> list[Path]:
-    """存档目录写不进去时的候选：exe 同级 `data/`、`%LOCALAPPDATA%\\YQ_moTools`。"""
-    out: list[Path] = []
-    try:
-        base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
-    except Exception:  # pragma: no cover
-        base = None
-    if base is not None:
-        out.append(base / "data")
+    """存档目录写不进去时的候选（按顺序试）：`<exe>\\data`、`%LOCALAPPDATA%\\YQ_moTools`。"""
+    from yqrec.config import local_data_dir
+
+    out: list[Path] = [local_data_dir()]
     local = os.environ.get("LOCALAPPDATA")
     if local and Path(local).is_absolute():
         out.append(Path(local) / "YQ_moTools")
     return out
 
 
-def _ensure_writable_data_dir() -> str:
-    """开跑前先"真写一次"存档目录；写不进去就换一个能写的，并把原因返回给界面。
+def _ensure_writable_data_dir() -> tuple[str, str]:
+    """开跑前先"真写一次"存档目录；写不进去就换一个能写的。
 
+    返回 `(短句, 详情)`：短句给窗口最下方的消息区（一行以内），详情给悬浮气泡与日志。
     为什么必须实测：ACL 看着完全正常（`Administrator:(F)`）也可能 `open(...,'a')`
     照样 `PermissionError`（2026-10-23 实机）。只查权限会给出"一切正常"的假结论。
+
+    降级顺序：配置的目录 → `Local`（`<exe>\\data`）→ `%LOCALAPPDATA%\\YQ_moTools`。
+    即 "Temp 写不进去自动降级为 Local" 就是这里实现的（候选表第一项就是 Local）。
     """
-    from yqrec.config import data_dir, probe_writable
+    from yqrec.config import archive_setting, data_dir, probe_writable
 
     try:
         primary = data_dir()
     except Exception as exc:
-        return f"存档目录解析失败：{type(exc).__name__}: {exc}"
+        return ("存档目录解析失败，本次不保存设置", f"data_dir() 抛错：{type(exc).__name__}: {exc}")
     error = probe_writable(primary)
     if error is None:
-        return ""
+        return ("", "")
+    setting = archive_setting()
     for candidate in _fallback_candidates():
+        if candidate == primary:
+            continue
         if probe_writable(candidate) is None:
             os.environ["YQREC_DATA_DIR"] = str(candidate)
-            return (
-                f"默认存档目录写不进去：\n{primary}\n原因：{error}\n\n"
-                f"本次已改用：\n{candidate}\n"
-                "（设置/标定/日志都会存在这里；想让数据回到 %APPDATA%，请把该文件夹"
-                "加入安全软件白名单，或删除 %APPDATA%\\YQ_moTools 后重开）"
+            detail = (
+                f"配置 archive_path = {setting or '（未配置，默认 Temp）'}\n"
+                f"目标目录：{primary}\n"
+                f"写入失败：{error}\n"
+                f"本次改用：{candidate}\n"
+                "（设置/标定/日志都存这里；想回到 C 盘，请把本程序加入安全软件白名单，"
+                "或把 archive_path 改成 Local 固定用程序目录）"
             )
-    return (
-        f"存档目录写不进去：\n{primary}\n原因：{error}\n\n"
-        "备选目录也写不进去，本次的设置/标定/日志都无法保存。"
+            return (f"存档写不进 C 盘，已改用 {candidate.name} 目录（悬停看详情）", detail)
+    detail = (
+        f"配置 archive_path = {setting or '（未配置，默认 Temp）'}\n"
+        f"目标目录：{primary}\n"
+        f"写入失败：{error}\n"
+        "备选目录也写不进去 → 本次的设置/标定/日志都无法保存。\n"
         "请检查安全软件（360 等）拦截，或把程序放到有写权限的目录。"
     )
+    return ("存档目录不可写，本次不保存设置（悬停看详情）", detail)
 
 
 def run_gui(argv: list[str] | None = None) -> int:
@@ -162,7 +171,7 @@ def run_gui(argv: list[str] | None = None) -> int:
     prepare_assets_path()
     _ensure_std_streams()
     _detach_cwd()
-    data_note = _ensure_writable_data_dir()
+    data_note, data_detail = _ensure_writable_data_dir()
     log_dir_text = ""
     log_failed = False
     try:
@@ -197,21 +206,32 @@ def run_gui(argv: list[str] | None = None) -> int:
 
     window = MainWindow()
     window.show()
-    _report_paths(window, log_failed=log_failed, log_dir_text=log_dir_text, note=data_note)
+    _report_paths(
+        window,
+        log_failed=log_failed,
+        log_dir_text=log_dir_text,
+        note=data_note,
+        detail=data_detail,
+    )
     _log.info("GUI 启动完成")
     return int(app.exec())
 
 
 def _report_paths(
-    window: object, *, log_failed: bool, log_dir_text: str = "", note: str = ""
+    window: object,
+    *,
+    log_failed: bool,
+    log_dir_text: str = "",
+    note: str = "",
+    detail: str = "",
 ) -> None:
-    """启动自检：把路径写进日志；写不了就在界面上说清楚（弹窗，不再静默）。
+    """启动自检：把路径写进日志；写不了就在窗口最下方的消息区说清楚（不弹窗）。
 
     "东西写不进 C 盘存档"这类问题在旧版里是完全无声的：日志 handler 装不上、
     settings.json 写失败都只留一行 warning，而那行 warning 本身就写不进磁盘。
     结果用户只能看到"设置不生效 / 乐器变回旧的"。
     """
-    from yqrec.config import config_path, data_dir, profile_path
+    from yqrec.config import archive_setting, config_path, data_dir, profile_path
 
     actual_log = _file_log_path()
     log_text = actual_log or log_dir_text or "-"
@@ -224,6 +244,7 @@ def _report_paths(
     except Exception as exc:  # 配置坏了也要能看见
         click_text = f"读取失败: {exc}"
     rows: list[tuple[str, str]] = [
+        ("存档配置", archive_setting() or "（未配置，默认 Temp）"),
         ("数据目录", str(data_dir())),
         ("设置", str(config_path())),
         ("标定档", str(profile_path("default"))),
@@ -234,10 +255,10 @@ def _report_paths(
     for label, path in rows:
         _log.info("路径[%s] = %s", label, path)
     if note:
-        _log.warning("存档目录不可写：%s", note.replace("\n", " "))
+        _log.warning("存档目录异常：%s ｜ %s", note, detail.replace("\n", " "))
     report = getattr(window, "show_startup_diagnostics", None)
     if callable(report):
-        report(rows=rows, log_failed=log_failed, note=note)
+        report(rows=rows, log_failed=log_failed, note=note, detail=detail)
 
 
 

@@ -390,6 +390,32 @@ def load_sampling(path: Path | str | None = None) -> SamplingSpec:
     return parse_sampling(data.get("sampling"))
 
 
+def load_archive_path(path: Path | str | None = None) -> str:
+    r"""加载**存档根目录**配置 `archive_path`（全局参数，所有乐器一致）。
+
+    取值三形态：
+    - ``"Local"``：跟 exe 同级（`<exe目录>/data`），便携/免写 C 盘用；
+    - ``"Temp"``：`%APPDATA%\YQ_moTools`（**写不进去会自动降级为 Local**，见 `config.data_dir()`）；
+    - 其他字符串：当作**绝对路径**直接用（`%VAR%` / `~` 会展开）；相对路径视为非法。
+
+    缺段/非法值一律返回 ``""``（= 走默认 %APPDATA% 链路）并记 warning，绝不抛
+    （与 `sampling` / `record_click` 同风格）。
+    """
+    p = Path(path) if path else instruments_path()
+    try:
+        data = _read_json(p)
+    except (OSError, ValueError) as exc:
+        _log.warning("读取 archive_path 失败（%s），按默认存档位置处理", exc)
+        return ""
+    raw = data.get("archive_path")
+    if raw is None:
+        return ""
+    if not isinstance(raw, str):
+        _log.warning("archive_path=%r 不是字符串，按默认存档位置处理", raw)
+        return ""
+    return raw.strip()
+
+
 def load_record_click(path: Path | str | None = None) -> int:
     """加载**全局** `record_click` 模式（录制启动前的输入注入，所有乐器一致）。
 
