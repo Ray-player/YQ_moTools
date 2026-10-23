@@ -1,5 +1,0 @@
-/*
- @name 小星星
- @instrument 风物之诗
-*/
-A 200 S 200

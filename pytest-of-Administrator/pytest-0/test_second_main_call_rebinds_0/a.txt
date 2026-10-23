@@ -1,9 +1,0 @@
-/*
-  @name 
-  @instrument 风物之诗琴
-  @instrument_id fwzs
-  @duration_ms 283
-  @fps 59.7
-  @dropped 0
-  @black_frames 0
-*/

@@ -95,6 +95,14 @@ class UiConfig:
     """检测色值方式：`ring`（只采外环，默认）/ `square`（整块 2R 方形，含中心图标）。"""
     square_offset_y: int = 0
     """`square` 模式下采样区域相对检测圈中心的纵向偏移（1920 宽基准的像素，正数向下）。"""
+    instrument: str = ""
+    """上次选中的乐器 id（空 = 没选过 / 老档）。
+
+    必须存在这里、而不是只靠标定档：标定档（`profiles/default.json`）只在**重新标定**时
+    才写，换了乐器却没重新标定的话，启动时会被标定档里的旧乐器一把拽回去
+    （2026-10-23 用户实机反馈："乐器一直固定在老旧的诗琴"）。空值保留"跟随标定档"的
+    旧行为，老档升级后不会丢标定。
+    """
 
 
 @dataclass(slots=True)
@@ -143,9 +151,75 @@ r"""数据目录名（`%APPDATA%\YQ_moTools`、`<文档>\YQ_moTools`）。
 """
 
 
+def _env_dir(name: str) -> Path | None:
+    """读一个环境变量当目录用；**非绝对路径一律不认**（返回 None）。
+
+    这一点是硬约束：`APPDATA` 为空/被写成相对路径时，`Path("")/"YQ_moTools"/"logs"`
+    会落到**当前工作目录**（= exe 所在目录），于是日志、设置、标定全被写到运行目录，
+    而用户以为它们还在 `%APPDATA%`（2026-10-23 实机：运行目录凭空多出 logs/，
+    `theme` 的 `%TEMP%` 缓存也退化成 cwd）。宁可报错，也不往 cwd 写。
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    text = os.path.expandvars(raw.strip().strip('"'))
+    if not text:
+        return None
+    path = Path(text)
+    return path if path.is_absolute() else None
+
+
+def _home_dir() -> Path:
+    """用户主目录（保证绝对路径；拿不到就抛错，不返回相对路径）。"""
+    home = _env_dir("USERPROFILE") or _env_dir("HOME")
+    if home is not None:
+        return home
+    try:
+        candidate = Path.home()
+    except Exception:  # pragma: no cover - 极端环境
+        candidate = None
+    if candidate is not None and candidate.is_absolute():
+        return candidate
+    raise RuntimeError("无法确定用户主目录（APPDATA / USERPROFILE / HOME 均不可用）")
+
+
+def _roaming_from_registry() -> Path | None:
+    """注册表兜底：`HKCU\\...\\User Shell Folders\\AppData`（环境变量被剥掉时仍有值）。"""
+    try:
+        import winreg  # noqa: PLC0415 - 仅 Windows 需要
+    except ImportError:  # pragma: no cover - 非 Windows
+        return None
+    try:
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            raw, _kind = winreg.QueryValueEx(key, "AppData")
+    except OSError:
+        return None
+    if not isinstance(raw, str):
+        return None
+    path = Path(os.path.expandvars(raw))
+    return path if path.is_absolute() else None
+
+
+def data_dir() -> Path:
+    r"""数据目录（**绝对路径**，`%APPDATA%\YQ_moTools`）：设置 / 标定 / 日志都在它下面。
+
+    解析顺序：`YQREC_DATA_DIR`（显式覆盖，测试与便携版用）→ `APPDATA` →
+    注册表的 User Shell Folders → `<主目录>\AppData\Roaming`。
+    与旧实现（`os.environ.get("APPDATA") or Path.home()`）的区别：任何一步拿到相对路径都
+    视为无效，继续往下找，最终仍失败就抛 `RuntimeError` —— 绝不让数据落到 cwd。
+    """
+    override = _env_dir("YQREC_DATA_DIR")
+    if override is not None:
+        return override
+    roaming = _env_dir("APPDATA") or _roaming_from_registry()
+    if roaming is None:
+        roaming = _home_dir() / "AppData" / "Roaming"
+    return roaming / DATA_DIR_NAME
+
+
 def config_dir() -> Path:
-    base = os.environ.get("APPDATA") or str(Path.home())
-    return Path(base) / DATA_DIR_NAME
+    return data_dir()
 
 
 def config_path() -> Path:

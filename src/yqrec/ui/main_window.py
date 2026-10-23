@@ -209,6 +209,8 @@ class MainWindow(QMainWindow):
         self._save_timer: QTimer | None = None
         self._low_fps_hinted = False
         self._src_limited_hinted = False
+        self._startup_paths: list[tuple[str, str]] = []
+        """启动自检算出来的路径（数据目录 / 设置 / 标定档 / 日志），只用于界面提示。"""
         self._requested_backend = "dxgi"
         self._suppress_save = False
         self._profile_delta: dict[str, int] = {}
@@ -260,7 +262,7 @@ class MainWindow(QMainWindow):
         self._apply_on_top_state(self._config.ui.always_on_top)
         self._playback.note_played.connect(self._highlight_note)
         self._playback.state_changed.connect(self._on_playback_state)
-        self._load_instrument(self._spec.id)
+        self._load_startup_instrument()
         _log.info("捕获后端可用性: %s", backend_availability())
         self._load_profile()
         # 首次运行（没有 settings.json）时把默认配置**现在**就落盘。构造期全程都在
@@ -1002,6 +1004,34 @@ class MainWindow(QMainWindow):
         combo.setCurrentIndex(index)
         combo.blockSignals(False)
 
+    def _load_startup_instrument(self) -> None:
+        """启动时按 `settings.json` 的 `ui.instrument` 恢复乐器（空 = 沿用 JSON 第一个可选）。
+
+        恢复期不写盘：选中的就是这个值，回写等于白写一次文件（还会在窗口可见前 mkdir）。
+        """
+        saved = str(self._config.ui.instrument or "").strip()
+        spec = self._instruments.get(saved) if saved else None
+        target = saved if spec is not None and not spec.preview_only else self._spec.id
+        previous = self._suppress_save
+        self._suppress_save = True
+        try:
+            self._load_instrument(target)
+        finally:
+            self._suppress_save = previous
+
+    def _remember_instrument(self, inst_id: str) -> None:
+        """记住当前乐器（`settings.json` 的 `ui.instrument`）。
+
+        构建期、恢复标定期、以及值没变时都不落盘 —— 避免启动瞬间写文件（首次运行
+        在窗口可见后写盘会拖出"标题栏 X 置灰"的假死，见 `__init__` 末尾注释）。
+        """
+        if self._suppress_save or not self._ui_ready:
+            return
+        if (self._config.ui.instrument or "") == inst_id:
+            return
+        self._config.ui.instrument = inst_id
+        self._save_app_config()
+
     def _load_instrument(self, inst_id: str) -> None:
         spec = self._instruments.get(inst_id)
         if spec is None:
@@ -1018,6 +1048,7 @@ class MainWindow(QMainWindow):
             self._apply_detection_spec(spec)
             self._refresh_sidebar_meta()
             self._select_instrument(inst_id)
+            self._remember_instrument(inst_id)
             return
         self._close_edit_panel()
         self._stop_playback()  # 换乐器 = 采样与键位映射都变了，试听必须停
@@ -1029,6 +1060,7 @@ class MainWindow(QMainWindow):
         self._reset_status_text()
         self._select_instrument(inst_id)
         self._refresh_action_emphasis()
+        self._remember_instrument(inst_id)
 
     def _apply_detection_spec(self, spec: InstrumentSpec) -> None:
         """Δ 是乐器自己的，采样几何是全局的；tooltip 把两边都写清楚，方便对照 JSON 调试。"""
@@ -1897,6 +1929,7 @@ class MainWindow(QMainWindow):
             return
         if self._region is None:
             _log.warning("record_click 已启用（模式 %d）但没有框选区域，跳过注入", mode)
+            self._toast("录制启动：还没有框选区域，跳过激活窗口/按键注入", "warn")
             return
         left, top, width, height = self._region
         cx, cy = left + width // 2, top + height // 2
@@ -2484,6 +2517,21 @@ class MainWindow(QMainWindow):
             _log.warning("保存应用设置失败: %s", exc)
             self._set_error(f"保存设置失败：{exc}")
 
+    def show_startup_diagnostics(self, *, rows: list[tuple[str, object]], log_failed: bool) -> None:
+        """启动自检：把"设置 / 标定 / 日志到底落在哪"挂到消息区提示里，写不了就红字报。
+
+        背景（2026-10-23 用户实机）：`%APPDATA%` 解析不出来时，旧版会把日志/设置静默写到
+        运行目录，界面上完全看不出来 —— 用户只能看到"窗口大小和乐器每次都被拽回旧值"。
+        现在路径每次都进日志，写不进去还会在界面上说一句，不用再靠猜。
+        """
+        self._startup_paths = [(label, str(path)) for label, path in rows]
+        detail = "\n".join(f"{label}: {path}" for label, path in self._startup_paths)
+        if log_failed:
+            self._toast("日志文件写不进去：设置/标定也可能存不下来（把鼠标放这里看路径）", "error")
+            self._lbl_toast.setToolTip(detail)
+            return
+        self._lbl_toast.setToolTip(detail)
+
     # -- 窗口尺寸记忆（用户要求：缩放过就沿用上次大小） -------------------- #
 
     def _clamp_window_size(self, width: int, height: int) -> tuple[int, int]:
@@ -2649,9 +2697,27 @@ class MainWindow(QMainWindow):
                 )
                 return
             if profile_instrument in self._instruments and profile_instrument != self._spec.id:
+                chosen = str(self._config.ui.instrument or "").strip()
+                if chosen:
+                    # 用户在 settings.json 里明确选过乐器 → 别抢他的选择，也别把该乐器绑定的
+                    # 键位/基线/阈值套到当前乐器上（套错了是"看起来恢复了"的假状态）。
+                    # 旧版只认标定档，于是"换了乐器、没重新标定"下次启动就被拽回旧乐器
+                    # （2026-10-23 用户实机反馈："乐器一直固定在老旧的诗琴"）。
+                    _log.info(
+                        "标定档属于 %s，当前乐器是 %s（用户已选）→ 不恢复标定",
+                        profile_instrument,
+                        self._spec.id,
+                    )
+                    self._lbl_record_info.setText(
+                        f"上次标定是「{profile_spec.name if profile_spec else profile_instrument}」"
+                        f"的，当前乐器不同，未恢复标定；选回它或重新框选+学基线"
+                    )
+                    return
+                # 老档（`ui.instrument` 还是空）：沿用旧行为 —— 按标定档切乐器，并记住它
                 index = self._combo_instrument.findData(profile_instrument)
                 if index >= 0:
                     self._combo_instrument.setCurrentIndex(index)
+                self._config.ui.instrument = profile_instrument
             if isinstance(profile.target, ScreenTarget):
                 rect = profile.target.rect
                 self._region = (rect.left, rect.top, rect.width, rect.height)

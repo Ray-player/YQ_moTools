@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-import tempfile
+import os
 from pathlib import Path
 from typing import Final
 
@@ -257,9 +257,30 @@ def focus_ring(theme: str | None = None) -> QColor:
 # 3. 下拉箭头（QSS 的 image: url() 只能吃文件路径，故运行时生成一张 PNG 缓存）
 # --------------------------------------------------------------------------- #
 def _cache_dir() -> Path:
-    path = Path(tempfile.gettempdir()) / "yqrec-theme"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """下拉箭头 PNG 的缓存目录（**保证绝对路径，且不会落在当前工作目录**）。
+
+    旧实现直接用 `tempfile.gettempdir()`：当 TEMP/TMP 为空或不可写时，它会**回退到
+    cwd** —— 打包版就是在 exe 旁边长出一个 `yqrec-theme/`（2026-10-23 实机看到）。
+    现在只认显式配置的临时目录；一个都不可用就退到数据目录下的 `cache/`。
+    """
+    for name in ("TEMP", "TMP", "TMPDIR"):
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        candidate = Path(os.path.expandvars(raw.strip().strip('"')))
+        if not candidate.is_absolute():
+            continue
+        target = candidate / "yqrec-theme"
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            return target
+        except OSError:
+            continue
+    from ..config import data_dir  # 延迟导入：theme 也会被无 config 的场景（设计稿预览）引用
+
+    fallback = data_dir() / "cache"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
 def chevron_url(theme: str | None = None) -> str:
