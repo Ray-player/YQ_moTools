@@ -1,0 +1,10 @@
+/*
+  @name 
+  @instrument 风物之诗琴
+  @instrument_id fwzs
+  @duration_ms 233
+  @fps 25.0
+  @dropped 0
+  @black_frames 0
+  @thread_error boom: 合成源猝死
+*/

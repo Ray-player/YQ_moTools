@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "name": "测试/曲:名",
+  "instrument": "风物之诗",
+  "events": [
+    {
+      "t": 0.0,
+      "key": "A",
+      "down": true
+    },
+    {
+      "t": 100.0,
+      "key": "S",
+      "down": true
+    },
+    {
+      "t": 100.0,
+      "key": "A",
+      "down": false
+    },
+    {
+      "t": 150.0,
+      "key": "S",
+      "down": false
+    }
+  ]
+}

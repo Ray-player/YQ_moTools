@@ -1,0 +1,824 @@
+{
+  "version": 4,
+  "_comment": "乐器参数:note_to_audio 相对 assets/ 目录。instruments 为数组，顺序即界面下拉顺序；id 必须唯一。sampling 是全局采样口径（点采样），所有乐器统一使用；「检测」下拉旁的「半径」滑条会直接改写这个段（松手即写盘），改完需重新学基线；手改本文件后按 F5 重读。",
+  "sampling": {
+    "_comment": "采样几何（点采样，单位都是键半径 R 的倍数）。内环半径 = 0.98 - ring_width_ratio（默认 0.18 → 0.80R），采样点就落在内环圆周上；方块半边长 = square_side_ratio / 2（默认 1.1 → 0.55R，方块恒居中）。ring_points = 内环圆周上的等角点数（默认 8）；square_points = 方块每条边的点数（默认 4，总点数 4 倍）；point_patch_ratio = 每个基准点取多大一块圆斑均值（抗压缩噪声）。",
+    "ring_width_ratio": 0.36,
+    "square_side_ratio": 1.1,
+    "ring_points": 8,
+    "square_points": 4,
+    "point_patch_ratio": 0.06
+  },
+  "_sustain_ms_comment": "乐器级延音阈值（int，毫秒）：0 = 该乐器不会延音；>0 = 按键按下时长达到它才记为延音（例如 300 表示按住 ≥300ms 才写进谱面的 [ms] 后缀）。谐律键琴暂定 300，实机手感不合适直接改本值后按 F5 重读。旧写法 sustain: true/false 仍可读（true → 200ms）。",
+  "record_click": 1,
+  "_record_click_comment": "录制启动前的输入注入（全局参数，所有乐器一致）：0=不启用；1=把框选区域所在窗口激活为前台后模拟一次空格键（激活失败坚决不发，防止空格误触本程序按钮）；2=在框选区域中心模拟一次鼠标左键点击（光标移过去→按下抬起→恢复光标原位）。均借鉴 BetterGI 前台 SendInput + MAA 前台激活方案（docs/06），发生在开始录帧之前，注入本身不会进谱面。",
+  "_preview_only_comment": "乐器级 preview_only（bool，默认 false）：true = 该乐器在界面的乐器下拉里可见但**不可选**（灰显，仅用于预览支持列表）。给参数还没标定完、选中必定认不准的乐器用；标定完成后删掉本键（或改 false）重启即恢复可选。当前悠可琴(ykq) / 余音(yy) 为 true：双区配色与和弦区判定待实机标定。",
+  "instruments": [
+    {
+      "id": "fwzs",
+      "name": "风物之诗琴",
+      "key_count": 21,
+      "sustain_ms": 0,
+      "button_radius": 54,
+      "delta": 20,
+      "detection": {
+        "metric": "weighted",
+        "channels": [
+          "R",
+          "G",
+          "B"
+        ],
+        "unpressed_ref": [
+          246,
+          242,
+          231
+        ],
+        "pressed_ref": [
+          163,
+          228,
+          206
+        ],
+        "note": "米白盘→青绿盘：按下时只有 R 明显下降（G 升高），故用 chroma 判据『绿相对红变强』。采样几何由全局 sampling 段决定（默认环形 0.55R~0.98R）：键帽中心的音符图标按下时几乎不变，只会稀释信号；排除它以后，同一乐器在红叶树背景信号 80、金黄花海背景信号 55，未按下干扰都只有 2（信噪比 27~55 倍；整块方形只有 4~12 倍）。refs 为环形口径实测：未按下 246,242,231 → 按下 163,228,206。delta=30 约为最小信号(55)的 1.8 倍，想更灵敏可降到 20（干扰仍在 2 左右）。｜v1.20 判据改 weighted（点采样 + 三通道加权 + 死区）：权重由 refs 跌幅 (83,14,25) 归一化，对 G/B 下降更敏感（米白→青绿）；死区 8 吃掉各键基准色偏差。",
+        "tolerance": 8,
+        "confirm_frames": 2,
+        "weights": [
+          0.68,
+          0.115,
+          0.205
+        ]
+      },
+      "areas": [
+        {
+          "code": "main",
+          "name": "琴键区域",
+          "channels": [
+            "R"
+          ],
+          "keys": [
+            "Q",
+            "W",
+            "E",
+            "R",
+            "T",
+            "Y",
+            "U",
+            "A",
+            "S",
+            "D",
+            "F",
+            "G",
+            "H",
+            "J",
+            "Z",
+            "X",
+            "C",
+            "V",
+            "B",
+            "N",
+            "M"
+          ]
+        }
+      ],
+      "note_to_key": {
+        "+1": "Q",
+        "+2": "W",
+        "+3": "E",
+        "+4": "R",
+        "+5": "T",
+        "+6": "Y",
+        "+7": "U",
+        "1": "A",
+        "2": "S",
+        "3": "D",
+        "4": "F",
+        "5": "G",
+        "6": "H",
+        "7": "J",
+        "-1": "Z",
+        "-2": "X",
+        "-3": "C",
+        "-4": "V",
+        "-5": "B",
+        "-6": "N",
+        "-7": "M"
+      },
+      "note_to_audio": {
+        "+1": "audio/fwzs/1+.mp3",
+        "+2": "audio/fwzs/2+.mp3",
+        "+3": "audio/fwzs/3+.mp3",
+        "+4": "audio/fwzs/4+.mp3",
+        "+5": "audio/fwzs/5+.mp3",
+        "+6": "audio/fwzs/6+.mp3",
+        "+7": "audio/fwzs/7+.mp3",
+        "1": "audio/fwzs/1.mp3",
+        "2": "audio/fwzs/2.mp3",
+        "3": "audio/fwzs/3.mp3",
+        "4": "audio/fwzs/4.mp3",
+        "5": "audio/fwzs/5.mp3",
+        "6": "audio/fwzs/6.mp3",
+        "7": "audio/fwzs/7.mp3",
+        "-1": "audio/fwzs/1-.mp3",
+        "-2": "audio/fwzs/2-.mp3",
+        "-3": "audio/fwzs/3-.mp3",
+        "-4": "audio/fwzs/4-.mp3",
+        "-5": "audio/fwzs/5-.mp3",
+        "-6": "audio/fwzs/6-.mp3",
+        "-7": "audio/fwzs/7-.mp3"
+      },
+      "hough": {
+        "dp": 2.0,
+        "min_dist": 80,
+        "param1": 20,
+        "param2": 40,
+        "min_radius": 40,
+        "max_radius": 53,
+        "upper_bound": 239
+      },
+      "thresholds": {
+        "main": {
+          "min_r": 0,
+          "max_r": 190,
+          "min_g": 0,
+          "max_g": 0,
+          "min_b": 0,
+          "max_b": 0
+        }
+      }
+    },
+    {
+      "id": "xljq",
+      "name": "谐律键琴",
+      "key_count": 21,
+      "sustain_ms": 300,
+      "button_radius": 54,
+      "delta": 20,
+      "detection": {
+        "metric": "weighted",
+        "channels": [
+          "R",
+          "G",
+          "B"
+        ],
+        "unpressed_ref": [
+          247,
+          242,
+          230
+        ],
+        "pressed_ref": [
+          218,
+          196,
+          155
+        ],
+        "note": "白盘→棕盘（R -29 / G -46 / B -75，B 通道跌幅最大），故用 max_drop。ref 为盘面色（圆环中位数），来自 1696x957 演奏视频 —— 这张参考图原本被记成 fwzs，M2i 确认它是谐律键琴。delta=40 是按整块方形口径标定的；改全局 sampling 后建议先「学习基线」再微调本值。延音录制尚未实现。｜v1.20 判据改 weighted（点采样 + 三通道加权 + 死区）：权重由 refs 跌幅 (29,46,75) 归一化，B 通道最重（白→棕）。",
+        "tolerance": 8,
+        "confirm_frames": 2,
+        "weights": [
+          0.193,
+          0.307,
+          0.5
+        ]
+      },
+      "areas": [
+        {
+          "code": "main",
+          "name": "琴键区域",
+          "channels": [
+            "R"
+          ],
+          "keys": [
+            "Q",
+            "W",
+            "E",
+            "R",
+            "T",
+            "Y",
+            "U",
+            "A",
+            "S",
+            "D",
+            "F",
+            "G",
+            "H",
+            "J",
+            "Z",
+            "X",
+            "C",
+            "V",
+            "B",
+            "N",
+            "M"
+          ]
+        }
+      ],
+      "note_to_key": {
+        "+1": "Q",
+        "+2": "W",
+        "+3": "E",
+        "+4": "R",
+        "+5": "T",
+        "+6": "Y",
+        "+7": "U",
+        "1": "A",
+        "2": "S",
+        "3": "D",
+        "4": "F",
+        "5": "G",
+        "6": "H",
+        "7": "J",
+        "-1": "Z",
+        "-2": "X",
+        "-3": "C",
+        "-4": "V",
+        "-5": "B",
+        "-6": "N",
+        "-7": "M"
+      },
+      "note_to_audio": {
+        "+1": "audio/xljq/1+.mp3",
+        "+2": "audio/xljq/2+.mp3",
+        "+3": "audio/xljq/3+.mp3",
+        "+4": "audio/xljq/4+.mp3",
+        "+5": "audio/xljq/5+.mp3",
+        "+6": "audio/xljq/6+.mp3",
+        "+7": "audio/xljq/7+.mp3",
+        "1": "audio/xljq/1.mp3",
+        "2": "audio/xljq/2.mp3",
+        "3": "audio/xljq/3.mp3",
+        "4": "audio/xljq/4.mp3",
+        "5": "audio/xljq/5.mp3",
+        "6": "audio/xljq/6.mp3",
+        "7": "audio/xljq/7.mp3",
+        "-1": "audio/xljq/1-.mp3",
+        "-2": "audio/xljq/2-.mp3",
+        "-3": "audio/xljq/3-.mp3",
+        "-4": "audio/xljq/4-.mp3",
+        "-5": "audio/xljq/5-.mp3",
+        "-6": "audio/xljq/6-.mp3",
+        "-7": "audio/xljq/7-.mp3"
+      },
+      "hough": {
+        "dp": 2.0,
+        "min_dist": 80,
+        "param1": 20,
+        "param2": 40,
+        "min_radius": 40,
+        "max_radius": 53,
+        "upper_bound": 239
+      },
+      "thresholds": {
+        "main": {
+          "min_r": 0,
+          "max_r": 190,
+          "min_g": 0,
+          "max_g": 0,
+          "min_b": 0,
+          "max_b": 0
+        }
+      }
+    },
+    {
+      "id": "jhzq",
+      "name": "镜花之琴",
+      "key_count": 21,
+      "sustain_ms": 0,
+      "button_radius": 47,
+      "delta": 20,
+      "detection": {
+        "metric": "weighted",
+        "channels": [
+          "R",
+          "G",
+          "B"
+        ],
+        "unpressed_ref": [
+          249,
+          243,
+          231
+        ],
+        "pressed_ref": [
+          222,
+          199,
+          157
+        ],
+        "note": "米白盘→金黄盘（refTex 2026-10-22 实测，环形 0.80R×8 点 / patch 0.06R 口径）：未按下 (249,243,231) → 按下 (222,199,157)，Δ=(27,44,74)，B 通道跌幅最大。weights 由 refs 跌幅归一化（与 refs 自洽）；Δ=20 时参考图按下键 score≈46、未按下 0（余量 2.3×），Δ 安全窗口实测 4~44。本值仍待实机确认（参考图带白色键名方标，不能用来验收键位几何）。",
+        "tolerance": 8,
+        "confirm_frames": 2,
+        "weights": [
+          0.19,
+          0.3,
+          0.51
+        ]
+      },
+      "areas": [
+        {
+          "code": "main",
+          "name": "琴键区域",
+          "channels": [
+            "R"
+          ],
+          "keys": [
+            "Q",
+            "W",
+            "E",
+            "R",
+            "T",
+            "Y",
+            "U",
+            "A",
+            "S",
+            "D",
+            "F",
+            "G",
+            "H",
+            "J",
+            "Z",
+            "X",
+            "C",
+            "V",
+            "B",
+            "N",
+            "M"
+          ]
+        }
+      ],
+      "note_to_key": {
+        "+1": "Q",
+        "+2": "W",
+        "+3": "E",
+        "+4": "R",
+        "+5": "T",
+        "+6": "Y",
+        "+7": "U",
+        "1": "A",
+        "2": "S",
+        "3": "D",
+        "4": "F",
+        "5": "G",
+        "6": "H",
+        "7": "J",
+        "-1": "Z",
+        "-2": "X",
+        "-3": "C",
+        "-4": "V",
+        "-5": "B",
+        "-6": "N",
+        "-7": "M"
+      },
+      "note_to_audio": {
+        "+1": "audio/jhzq/1+.mp3",
+        "+2": "audio/jhzq/2+.mp3",
+        "+3": "audio/jhzq/3+.mp3",
+        "+4": "audio/jhzq/4+.mp3",
+        "+5": "audio/jhzq/5+.mp3",
+        "+6": "audio/jhzq/6+.mp3",
+        "+7": "audio/jhzq/7+.mp3",
+        "1": "audio/jhzq/1.mp3",
+        "2": "audio/jhzq/2.mp3",
+        "3": "audio/jhzq/3.mp3",
+        "4": "audio/jhzq/4.mp3",
+        "5": "audio/jhzq/5.mp3",
+        "6": "audio/jhzq/6.mp3",
+        "7": "audio/jhzq/7.mp3",
+        "-1": "audio/jhzq/1-.mp3",
+        "-2": "audio/jhzq/2-.mp3",
+        "-3": "audio/jhzq/3-.mp3",
+        "-4": "audio/jhzq/4-.mp3",
+        "-5": "audio/jhzq/5-.mp3",
+        "-6": "audio/jhzq/6-.mp3",
+        "-7": "audio/jhzq/7-.mp3"
+      },
+      "hough": {
+        "dp": 2.0,
+        "min_dist": 80,
+        "param1": 20,
+        "param2": 40,
+        "min_radius": 40,
+        "max_radius": 53,
+        "upper_bound": 239
+      },
+      "thresholds": {
+        "main": {
+          "min_r": 0,
+          "max_r": 190,
+          "min_g": 0,
+          "max_g": 0,
+          "min_b": 0,
+          "max_b": 0
+        }
+      }
+    },
+    {
+      "id": "ljdsq",
+      "name": "老旧的诗琴",
+      "key_count": 21,
+      "sustain_ms": 0,
+      "button_radius": 47,
+      "delta": 20,
+      "detection": {
+        "metric": "weighted",
+        "channels": [
+          "R",
+          "G",
+          "B"
+        ],
+        "unpressed_ref": [
+          246,
+          241,
+          227
+        ],
+        "pressed_ref": [
+          186,
+          215,
+          158
+        ],
+        "note": "米白盘→草绿盘（refTex 2026-10-22 实测，同上口径）：未按下 (246,241,227) → 按下 (186,215,158)，Δ=(60,26,69)，R/B 跌幅大、G 只掉 26。8 个降号键（W E Y U S J C N）的『b』字形压在 0.80R 左采样点上：实测 U/J/C 基线低 8~17 灰阶（由逐键基线吸收）、按下信号约打 7/8（score≈39，Δ=20 仍 2.0×）→ 本阶段不改采样角度，只把半径控制在 ≤0.85R。参考图按下键 score≈45、未按下 0（余量 2.2×）。",
+        "tolerance": 8,
+        "confirm_frames": 2,
+        "weights": [
+          0.39,
+          0.17,
+          0.44
+        ]
+      },
+      "areas": [
+        {
+          "code": "main",
+          "name": "琴键区域",
+          "channels": [
+            "R"
+          ],
+          "keys": [
+            "Q",
+            "W",
+            "E",
+            "R",
+            "T",
+            "Y",
+            "U",
+            "A",
+            "S",
+            "D",
+            "F",
+            "G",
+            "H",
+            "J",
+            "Z",
+            "X",
+            "C",
+            "V",
+            "B",
+            "N",
+            "M"
+          ]
+        }
+      ],
+      "note_to_key": {
+        "+1": "Q",
+        "+2": "W",
+        "+3": "E",
+        "+4": "R",
+        "+5": "T",
+        "+6": "Y",
+        "+7": "U",
+        "1": "A",
+        "2": "S",
+        "3": "D",
+        "4": "F",
+        "5": "G",
+        "6": "H",
+        "7": "J",
+        "-1": "Z",
+        "-2": "X",
+        "-3": "C",
+        "-4": "V",
+        "-5": "B",
+        "-6": "N",
+        "-7": "M"
+      },
+      "note_to_audio": {
+        "+1": "audio/ljdsq/1+.mp3",
+        "+2": "audio/ljdsq/2+.mp3",
+        "+3": "audio/ljdsq/3+.mp3",
+        "+4": "audio/ljdsq/4+.mp3",
+        "+5": "audio/ljdsq/5+.mp3",
+        "+6": "audio/ljdsq/6+.mp3",
+        "+7": "audio/ljdsq/7+.mp3",
+        "1": "audio/ljdsq/1.mp3",
+        "2": "audio/ljdsq/2.mp3",
+        "3": "audio/ljdsq/3.mp3",
+        "4": "audio/ljdsq/4.mp3",
+        "5": "audio/ljdsq/5.mp3",
+        "6": "audio/ljdsq/6.mp3",
+        "7": "audio/ljdsq/7.mp3",
+        "-1": "audio/ljdsq/1-.mp3",
+        "-2": "audio/ljdsq/2-.mp3",
+        "-3": "audio/ljdsq/3-.mp3",
+        "-4": "audio/ljdsq/4-.mp3",
+        "-5": "audio/ljdsq/5-.mp3",
+        "-6": "audio/ljdsq/6-.mp3",
+        "-7": "audio/ljdsq/7-.mp3"
+      },
+      "hough": {
+        "dp": 2.0,
+        "min_dist": 80,
+        "param1": 20,
+        "param2": 40,
+        "min_radius": 40,
+        "max_radius": 53,
+        "upper_bound": 239
+      },
+      "thresholds": {
+        "main": {
+          "min_r": 0,
+          "max_r": 190,
+          "min_g": 0,
+          "max_g": 0,
+          "min_b": 0,
+          "max_b": 0
+        }
+      }
+    },
+    {
+      "id": "ykq",
+      "name": "悠可琴",
+      "key_count": 21,
+      "sustain_ms": 0,
+      "preview_only": true,
+      "button_radius": 45,
+      "delta": 20,
+      "detection": {
+        "metric": "weighted",
+        "channels": [
+          "R",
+          "G",
+          "B"
+        ],
+        "unpressed_ref": null,
+        "pressed_ref": null,
+        "note": "待实机实测后回填 delta 与 refs（本值仅占位）｜v1.20 判据改 weighted（点采样 + 三通道加权 + 死区）：权重取 refTex 参考图实测（按下变深蓝）归一化；chord 区盘色各异，待实机再调。",
+        "tolerance": 8,
+        "confirm_frames": 2,
+        "weights": [
+          0.45,
+          0.35,
+          0.2
+        ]
+      },
+      "areas": [
+        {
+          "code": "chord",
+          "name": "和弦区域",
+          "channels": [
+            "R"
+          ],
+          "keys": [
+            "Q",
+            "W",
+            "E",
+            "R",
+            "T",
+            "Y",
+            "U"
+          ]
+        },
+        {
+          "code": "main",
+          "name": "琴键区域",
+          "channels": [
+            "R"
+          ],
+          "keys": [
+            "A",
+            "S",
+            "D",
+            "F",
+            "G",
+            "H",
+            "J",
+            "Z",
+            "X",
+            "C",
+            "V",
+            "B",
+            "N",
+            "M"
+          ]
+        }
+      ],
+      "note_to_key": {
+        "+1": "Q",
+        "+2": "W",
+        "+3": "E",
+        "+4": "R",
+        "+5": "T",
+        "+6": "Y",
+        "+7": "U",
+        "1": "A",
+        "2": "S",
+        "3": "D",
+        "4": "F",
+        "5": "G",
+        "6": "H",
+        "7": "J",
+        "-1": "Z",
+        "-2": "X",
+        "-3": "C",
+        "-4": "V",
+        "-5": "B",
+        "-6": "N",
+        "-7": "M"
+      },
+      "note_to_audio": {
+        "+1": "audio/ykq/1+.mp3",
+        "+2": "audio/ykq/2+.mp3",
+        "+3": "audio/ykq/3+.mp3",
+        "+4": "audio/ykq/4+.mp3",
+        "+5": "audio/ykq/5+.mp3",
+        "+6": "audio/ykq/6+.mp3",
+        "+7": "audio/ykq/7+.mp3",
+        "1": "audio/ykq/1.mp3",
+        "2": "audio/ykq/2.mp3",
+        "3": "audio/ykq/3.mp3",
+        "4": "audio/ykq/4.mp3",
+        "5": "audio/ykq/5.mp3",
+        "6": "audio/ykq/6.mp3",
+        "7": "audio/ykq/7.mp3",
+        "-1": "audio/ykq/1-.mp3",
+        "-2": "audio/ykq/2-.mp3",
+        "-3": "audio/ykq/3-.mp3",
+        "-4": "audio/ykq/4-.mp3",
+        "-5": "audio/ykq/5-.mp3",
+        "-6": "audio/ykq/6-.mp3",
+        "-7": "audio/ykq/7-.mp3"
+      },
+      "hough": {
+        "dp": 2.0,
+        "min_dist": 80,
+        "param1": 20,
+        "param2": 40,
+        "min_radius": 40,
+        "max_radius": 53,
+        "upper_bound": 239
+      },
+      "thresholds": {
+        "chord": {
+          "min_r": 0,
+          "max_r": 50,
+          "min_g": 0,
+          "max_g": 0,
+          "min_b": 0,
+          "max_b": 0
+        },
+        "main": {
+          "min_r": 0,
+          "max_r": 190,
+          "min_g": 0,
+          "max_g": 0,
+          "min_b": 0,
+          "max_b": 0
+        }
+      }
+    },
+    {
+      "id": "yy",
+      "name": "余音",
+      "key_count": 21,
+      "sustain_ms": 0,
+      "preview_only": true,
+      "button_radius": 45,
+      "delta": 20,
+      "detection": {
+        "metric": "weighted",
+        "channels": [
+          "R",
+          "G",
+          "B"
+        ],
+        "unpressed_ref": null,
+        "pressed_ref": null,
+        "note": "待实机实测后回填 delta 与 refs（本值仅占位）｜v1.20 判据改 weighted（点采样 + 三通道加权 + 死区）：权重取 refTex 参考图实测（按下变深紫）归一化；chord 区盘色各异，待实机再调。",
+        "tolerance": 8,
+        "confirm_frames": 2,
+        "weights": [
+          0.42,
+          0.4,
+          0.17
+        ]
+      },
+      "areas": [
+        {
+          "code": "chord",
+          "name": "和弦区域",
+          "channels": [
+            "R"
+          ],
+          "keys": [
+            "Q",
+            "W",
+            "E",
+            "R",
+            "T",
+            "Y",
+            "U"
+          ]
+        },
+        {
+          "code": "main",
+          "name": "琴键区域",
+          "channels": [
+            "R"
+          ],
+          "keys": [
+            "A",
+            "S",
+            "D",
+            "F",
+            "G",
+            "H",
+            "J",
+            "Z",
+            "X",
+            "C",
+            "V",
+            "B",
+            "N",
+            "M"
+          ]
+        }
+      ],
+      "note_to_key": {
+        "+1": "Q",
+        "+2": "W",
+        "+3": "E",
+        "+4": "R",
+        "+5": "T",
+        "+6": "Y",
+        "+7": "U",
+        "1": "A",
+        "2": "S",
+        "3": "D",
+        "4": "F",
+        "5": "G",
+        "6": "H",
+        "7": "J",
+        "-1": "Z",
+        "-2": "X",
+        "-3": "C",
+        "-4": "V",
+        "-5": "B",
+        "-6": "N",
+        "-7": "M"
+      },
+      "note_to_audio": {
+        "+1": "audio/yy/1+.mp3",
+        "+2": "audio/yy/2+.mp3",
+        "+3": "audio/yy/3+.mp3",
+        "+4": "audio/yy/4+.mp3",
+        "+5": "audio/yy/5+.mp3",
+        "+6": "audio/yy/6+.mp3",
+        "+7": "audio/yy/7+.mp3",
+        "1": "audio/yy/1.mp3",
+        "2": "audio/yy/2.mp3",
+        "3": "audio/yy/3.mp3",
+        "4": "audio/yy/4.mp3",
+        "5": "audio/yy/5.mp3",
+        "6": "audio/yy/6.mp3",
+        "7": "audio/yy/7.mp3",
+        "-1": "audio/yy/1-.mp3",
+        "-2": "audio/yy/2-.mp3",
+        "-3": "audio/yy/3-.mp3",
+        "-4": "audio/yy/4-.mp3",
+        "-5": "audio/yy/5-.mp3",
+        "-6": "audio/yy/6-.mp3",
+        "-7": "audio/yy/7-.mp3"
+      },
+      "hough": {
+        "dp": 2.0,
+        "min_dist": 80,
+        "param1": 20,
+        "param2": 40,
+        "min_radius": 40,
+        "max_radius": 53,
+        "upper_bound": 239
+      },
+      "thresholds": {
+        "chord": {
+          "min_r": 0,
+          "max_r": 50,
+          "min_g": 0,
+          "max_g": 0,
+          "min_b": 0,
+          "max_b": 0
+        },
+        "main": {
+          "min_r": 0,
+          "max_r": 190,
+          "min_g": 0,
+          "max_g": 0,
+          "min_b": 0,
+          "max_b": 0
+        }
+      }
+    }
+  ]
+}

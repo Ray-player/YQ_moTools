@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "a\\b/c:d*e?\"f<g>h|i",
+  "instrument": "",
+  "events": [
+    {
+      "t": 0.0,
+      "key": "A",
+      "down": true
+    },
+    {
+      "t": 50.0,
+      "key": "A",
+      "down": false
+    }
+  ]
+}

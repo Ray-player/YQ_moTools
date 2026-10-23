@@ -340,6 +340,30 @@ def test_score_json_marks_sustain_and_restores_it(spec_xljq: InstrumentSpec) -> 
     assert [(round(n.onset_ms), n.sustain_ms) for n in notes] == [(0, 800.0), (1000, 0.0)]
 
 
+def test_gap_is_onset_to_onset_not_onset_plus_hold(spec_xljq: InstrumentSpec) -> None:
+    """`A[800]1000F` → F 在 **1000ms**，不是 1800ms：`[800]` 不推进时间轴。
+
+    这条专门钉住"最容易被误读"的语义：数字永远是「上一个和弦的按下 → 这个和弦的按下」，
+    与前一和弦的按住时长无关（用户 2026-10-23 就为此确认过一次）。
+    """
+    score = bgi_sheet.score_from_tick_text("A[800]1000F")
+    notes = [e for e in score.events if isinstance(e, NoteEvent)]
+    assert [(round(n.onset_ms), round(n.sustain_ms)) for n in notes] == [(0, 800), (1000, 0)]
+
+    a, f = notes
+    assert round(a.onset_ms + a.sustain_ms) == 800, "A 的抬起时刻 = onset + [ms]"
+    assert round(f.onset_ms) == 1000, "F 的按下 = A 的按下 + 1000（不是 0+800+1000）"
+    assert round(f.onset_ms - (a.onset_ms + a.sustain_ms)) == 200, "A 松手到 F 按下只隔 200ms"
+
+
+def test_sustain_longer_than_gap_is_overlap_not_delay(spec_xljq: InstrumentSpec) -> None:
+    """延音比下一个音的间隔长 → 叠音（合法），不会把下一个音推后。"""
+    score = bgi_sheet.score_from_tick_text("A[1200]300F")
+    notes = [e for e in score.events if isinstance(e, NoteEvent)]
+    assert [(round(n.onset_ms), round(n.sustain_ms)) for n in notes] == [(0, 1200), (300, 0)]
+    assert notes[0].onset_ms + notes[0].sustain_ms > notes[1].onset_ms, "A 还按着 F 就响了"
+
+
 def test_record_from_recording_carries_sustain(spec_xljq: InstrumentSpec) -> None:
     """录制结果 → JSON：`tick.sustain` 标记与文本里的 `[ms]` 一致。"""
     spec = _spec_with_threshold(spec_xljq, 300)

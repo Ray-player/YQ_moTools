@@ -1,0 +1,13 @@
+{
+  "name": "手输_midi",
+  "author": "YQ_moTools",
+  "instrument": "风物之诗琴",
+  "description": "YQ_moTools · bgi_midi",
+  "type": "midi",
+  "bpm": "125",
+  "time_signature": "4/4",
+  "composer": "",
+  "arranger": "",
+  "notes": "DA0|UA60|DF440|UF60",
+  "ticks": 480
+}
