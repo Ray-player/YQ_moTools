@@ -57,6 +57,36 @@ def _ensure_std_streams() -> None:
                 pass
 
 
+def _detach_cwd() -> None:
+    r"""把进程的"当前工作目录"从 exe 目录挪到临时目录。
+
+    为什么会需要：**搜狗输入法**会把自己的 `debug.log` 写进宿主进程的当前工作目录
+    （内容全是 `sgime_skin.vN.filemap.sogouime` / `KernelParameterSetter … scheme=Sogou`
+    这类），于是交付目录里凭空多出一个跟本程序毫无关系的 debug.log —— 用户会以为那是
+    我们的日志，还会怀疑"我们的日志是不是被它覆盖了"。我们没法让 IME 不写，只能把 cwd 挪走。
+
+    安全性：本程序所有路径都是自己算的绝对路径（数据目录 / `YQREC_ASSETS` / 谱面默认目录 /
+    主题缓存），不依赖 cwd，所以挪走没有副作用。
+    """
+    for name in ("TEMP", "TMP", "TMPDIR"):
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        candidate = Path(os.path.expandvars(raw.strip().strip('"')))
+        if not candidate.is_absolute():
+            continue
+        target = candidate / "yqrec-cwd"
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            if Path.cwd() == target:
+                return
+            os.chdir(target)
+        except OSError:
+            continue
+        _log.info("工作目录已挪到 %s（避免输入法把 debug.log 写进程序目录）", target)
+        return
+
+
 def _log_dir() -> Path:
     """日志目录：跟数据目录同名（`config.DATA_DIR_NAME`），改产品名时不跟着改。"""
     # 必须绝对导入：打包 exe 里本模块以 `__main__`（无父包）运行，相对导入
@@ -131,6 +161,7 @@ def run_gui(argv: list[str] | None = None) -> int:
     enable_dpi_awareness()
     prepare_assets_path()
     _ensure_std_streams()
+    _detach_cwd()
     data_note = _ensure_writable_data_dir()
     log_dir_text = ""
     log_failed = False
@@ -198,6 +229,7 @@ def _report_paths(
         ("标定档", str(profile_path("default"))),
         ("日志", log_text),
         ("乐器配置", click_text),
+        ("工作目录", str(Path.cwd())),
     ]
     for label, path in rows:
         _log.info("路径[%s] = %s", label, path)
