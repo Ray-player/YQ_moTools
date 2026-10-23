@@ -829,6 +829,18 @@ class MainWindow(QMainWindow):
             return f"{fps:.1f} fps · {frames} 帧"
         return f"{fps:.1f} fps"
 
+    def show_injection_selftest(self, *, ok: bool, detail: str) -> None:
+        """启动自检（仅在 `record_click != 0` 时跑）：模拟输入到底能不能进系统输入队列。
+
+        通过 → 只写日志（不打扰）；失败 → 消息区 warn，气泡里带完整环境（会话/桌面/提权/沙箱），
+        一眼分清"指令没发出去"还是"发出去了目标不理会"。
+        """
+        if ok:
+            _log.info("输入自检通过：模拟光标可移动（注入通道正常）｜%s", detail.replace("\n", " "))
+            return
+        _log.warning("输入自检失败：模拟光标移不动（注入被拦截）｜%s", detail.replace("\n", " "))
+        self._toast("模拟键鼠被系统/安全软件拦截（悬停看环境）", "warn", detail=detail)
+
     def _toast(self, message: str, tone: str = "info", *, detail: str = "") -> None:
         """统一消息区：`info` / `warn` / `error` 三种语气，同一位置，超时清空。
 

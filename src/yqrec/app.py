@@ -213,8 +213,31 @@ def run_gui(argv: list[str] | None = None) -> int:
         note=data_note,
         detail=data_detail,
     )
+    _run_injection_selftest(window)
     _log.info("GUI 启动完成")
     return int(app.exec())
+
+
+def _run_injection_selftest(window: object) -> None:
+    """`record_click != 0` 时做一次"模拟键鼠能不能进系统输入队列"的自检。
+
+    只在这个开关打开时跑（用户打算注入时），动作是"光标挪 40px 再挪回"，几乎无感。
+    结论进日志；失败时界面出一句 warn（气泡里有会话/桌面/提权/沙箱，方便甩给排查）。
+    """
+    try:
+        from yqrec.instruments import load_record_click
+
+        if load_record_click() == 0:
+            return
+        from yqrec.inputsim import self_test
+
+        ok, detail = self_test()
+    except Exception:
+        _log.exception("输入自检异常（跳过）")
+        return
+    report = getattr(window, "show_injection_selftest", None)
+    if callable(report):
+        report(ok=ok, detail=detail)
 
 
 def _report_paths(

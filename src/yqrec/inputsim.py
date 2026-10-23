@@ -361,6 +361,32 @@ def _restore(saved: tuple[int, int] | None) -> None:
     move_cursor(restore[0], restore[1])
 
 
+def self_test(offset: int = 40) -> tuple[bool, str]:
+    """把光标挪开 `offset` 像素再挪回来，验证"模拟输入到底能不能进系统输入队列"。
+
+    返回 `(是否生效, 诊断详情)`。这是区分下面两种"没反应"的唯一可靠手段：
+
+    - **指令没进队列**（安全软件/驱动拦截、没有输入桌面）：光标纹丝不动；
+    - **进了队列但目标不理会**（打错窗口、目标不认合成输入）：光标正常移动。
+
+    启动时（`record_click != 0`）跑一次，结果只写日志、失败才提示，不动声色。
+    """
+    before = _cursor_pos()
+    left, top, width, height = _virtual_screen()
+    target_x = before[0] + offset if before[0] + offset < left + width else before[0] - offset
+    target = (target_x, before[1])
+    moved_ok = move_cursor(*target)
+    time.sleep(0.08)
+    actual = _cursor_pos()
+    moved = abs(actual[0] - target[0]) <= 2 and abs(actual[1] - target[1]) <= 2
+    move_cursor(*before)  # 无论如何都复位
+    detail = (
+        f"光标 {before} → {actual}（期望 {target}，move_cursor 返回 {moved_ok}）\n"
+        f"{environment_report()}"
+    )
+    return moved, detail
+
+
 def environment_report() -> str:
     """一句话环境自检：会话号 / 桌面名 / 是否提权 / 虚拟屏尺寸。
 
