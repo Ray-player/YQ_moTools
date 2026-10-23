@@ -243,6 +243,12 @@ def _report_paths(
         click_text = f"{instruments_path()}（record_click={load_record_click()}）"
     except Exception as exc:  # 配置坏了也要能看见
         click_text = f"读取失败: {exc}"
+    try:  # 注入相关的环境（会话/桌面/提权/虚拟屏）：排查"注入了没反应"的第一手信息
+        from yqrec.inputsim import environment_report
+
+        env_text = environment_report()
+    except Exception as exc:
+        env_text = f"读取失败: {exc}"
     rows: list[tuple[str, str]] = [
         ("存档配置", archive_setting() or "（未配置，默认 Temp）"),
         ("数据目录", str(data_dir())),
@@ -251,6 +257,7 @@ def _report_paths(
         ("日志", log_text),
         ("乐器配置", click_text),
         ("工作目录", str(Path.cwd())),
+        ("输入环境", env_text),
     ]
     for label, path in rows:
         _log.info("路径[%s] = %s", label, path)

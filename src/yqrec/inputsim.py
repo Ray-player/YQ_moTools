@@ -32,8 +32,16 @@ advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
+MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_ABSOLUTE = 0x8000
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+UOI_NAME = 2
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
 VK_SPACE = 0x20
@@ -67,6 +75,23 @@ advapi32.GetTokenInformation.argtypes = [
     ctypes.POINTER(wt.DWORD),
 ]
 user32.MapVirtualKeyW.argtypes = [wt.UINT, wt.UINT]
+user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+user32.GetSystemMetrics.restype = ctypes.c_int
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.SendInput.argtypes = [wt.UINT, ctypes.c_void_p, ctypes.c_int]
+user32.SendInput.restype = wt.UINT
+kernel32.ProcessIdToSessionId.argtypes = [wt.DWORD, ctypes.POINTER(wt.DWORD)]
+kernel32.WTSGetActiveConsoleSessionId.restype = wt.DWORD
+user32.GetThreadDesktop.argtypes = [wt.DWORD]
+user32.GetThreadDesktop.restype = wt.HANDLE
+user32.GetUserObjectInformationW.argtypes = [
+    wt.HANDLE,
+    ctypes.c_int,
+    ctypes.c_void_p,
+    wt.DWORD,
+    ctypes.POINTER(wt.DWORD),
+]
 user32.GetWindowTextLengthW.argtypes = [wt.HWND]
 user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
 user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
@@ -115,14 +140,60 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", ctypes.c_ulong), ("u", _U)]
 
 
-def _send_mouse(flags: int) -> bool:
+def _send_mouse(flags: int, dx: int = 0, dy: int = 0) -> bool:
     """投递一条鼠标事件；失败记 warning 返回 False。"""
     inp = _INPUT(type=INPUT_MOUSE)
+    inp.mi.dx = int(dx)
+    inp.mi.dy = int(dy)
     inp.mi.dwFlags = flags
     if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) != 1:
         _log.warning("SendInput(0x%x) 失败: winerror=%s", flags, ctypes.get_last_error())
         return False
     return True
+
+
+def _virtual_screen() -> tuple[int, int, int, int]:
+    """虚拟桌面（所有显示器并集）的 `(left, top, width, height)`。"""
+    return (
+        user32.GetSystemMetrics(SM_XVIRTUALSCREEN),
+        user32.GetSystemMetrics(SM_YVIRTUALSCREEN),
+        user32.GetSystemMetrics(SM_CXVIRTUALSCREEN),
+        user32.GetSystemMetrics(SM_CYVIRTUALSCREEN),
+    )
+
+
+def _cursor_pos() -> tuple[int, int]:
+    pt = wt.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    return (pt.x, pt.y)
+
+
+def move_cursor(x: int, y: int) -> bool:
+    """把光标移到全局物理像素 `(x, y)`；先走 SendInput 绝对移动，再退回 SetCursorPos。
+
+    为什么不能只靠 SetCursorPos：实测（2026-10-23 用户实机）它会**静默失败**
+    （返回 0、`GetLastError()` 还是 0），鼠标纹丝不动 —— 这类环境下
+    `SendInput(MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_VIRTUALDESK)` 仍然有效，因为它走的是
+    **输入队列**（和真实鼠标同一条路），不依赖调用进程对桌面的直接访问权。
+    """
+    left, top, width, height = _virtual_screen()
+    if width > 1 and height > 1:
+        nx = int(round((x - left) * 65535 / (width - 1)))
+        ny = int(round((y - top) * 65535 / (height - 1)))
+        nx = max(0, min(65535, nx))
+        ny = max(0, min(65535, ny))
+        if _send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny):
+            return True
+    if user32.SetCursorPos(int(x), int(y)):
+        return True
+    _log.warning(
+        "移动光标到 (%d, %d) 失败：SendInput 绝对移动 + SetCursorPos 都没成功"
+        "（winerror=%s）",
+        x,
+        y,
+        ctypes.get_last_error(),
+    )
+    return False
 
 
 def _send_key(vk: int, flags: int) -> bool:
@@ -252,18 +323,23 @@ def left_click(x: int, y: int, *, hold_ms: int = 60, restore_cursor: bool = True
       （借鉴 MAA WithCursorPos 的做法，尽量不打扰用户）。
     - ``hold_ms`` 是按下与抬起之间的间隔（过短有些程序会把 down/up 判成滚屏/拖动）。
     - 返回 True = down/up 都成功；False = 中途失败（光标仍会尽量复位）。
+
+    光标移动走 `move_cursor()`（SendInput 绝对移动优先），并在移动后**复核光标位置**：
+    有些环境里 `SetCursorPos` 静默失败（返回 0、错误码 0），只靠返回值会误判成"点过了"。
     """
     x, y = int(x), int(y)
-    saved: tuple[int, int] | None = None
-    if restore_cursor:
-        pt = wt.POINT()
-        if user32.GetCursorPos(ctypes.byref(pt)):
-            saved = (pt.x, pt.y)
-        else:
-            _log.warning("GetCursorPos 失败: winerror=%s（点击后无法恢复光标）", ctypes.get_last_error())
+    saved: tuple[int, int] | None = _cursor_pos() if restore_cursor else None
 
-    if not user32.SetCursorPos(x, y):
-        _log.warning("SetCursorPos(%d, %d) 失败: winerror=%s", x, y, ctypes.get_last_error())
+    if not move_cursor(x, y):
+        _restore(saved)
+        return False
+    actual = _cursor_pos()
+    if abs(actual[0] - x) > 2 or abs(actual[1] - y) > 2:
+        # 光标没到位就**放弃点击**：这时候 down/up 会落在"当前光标处"，
+        # 可能误点别的按钮（比"点不中"更糟）。
+        _log.warning(
+            "光标没到 (%d, %d)，实际停在 %s —— 输入被拦截，已放弃这次点击", x, y, actual
+        )
         _restore(saved)
         return False
 
@@ -281,8 +357,44 @@ def _restore(saved: tuple[int, int] | None) -> None:
     """光标复位；失败只记 warning（复位失败不该影响业务判断）。"""
     if saved is None:
         return
-    if not user32.SetCursorPos(saved[0], saved[1]):
-        _log.warning("恢复光标到 (%d, %d) 失败: winerror=%s", *saved, ctypes.get_last_error())
+    restore = saved
+    move_cursor(restore[0], restore[1])
+
+
+def environment_report() -> str:
+    """一句话环境自检：会话号 / 桌面名 / 是否提权 / 虚拟屏尺寸。
+
+    这条能解释掉一大类"注入无效"：进程不在**活动输入桌面**上（远程桌面、另一个会话、
+    锁屏/UAC 安全桌面）时，`SetCursorPos` 会静默失败、注入也进不了真实输入队列。
+    """
+    session = wt.DWORD()
+    kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(session))
+    console = int(kernel32.WTSGetActiveConsoleSessionId())
+    desktop = "?"
+    handle = user32.GetThreadDesktop(kernel32.GetCurrentThreadId())
+    if handle:
+        buf = ctypes.create_unicode_buffer(64)
+        needed = wt.DWORD()
+        if user32.GetUserObjectInformationW(
+            handle, UOI_NAME, buf, ctypes.sizeof(buf), ctypes.byref(needed)
+        ):
+            desktop = buf.value or "?"
+    left, top, width, height = _virtual_screen()
+    elevated = is_elevated(kernel32.GetCurrentProcessId())
+    flag = "是" if elevated else ("否" if elevated is False else "未知")
+    import os
+
+    markers = [
+        name
+        for name in ("SANDBOX_CENTER_IPC_ADDRESS", "WORKBUDDY_FS_PROTECTION_ROLE")
+        if os.environ.get(name)
+    ]
+    sandbox = "、".join(markers) if markers else "无"
+    return (
+        f"会话={session.value}/活动会话={console if console != 0xFFFFFFFF else '无'} "
+        f"桌面={desktop} 提权={flag} 虚拟屏=({left},{top},{width},{height}) "
+        f"光标={_cursor_pos()} 沙箱={sandbox}"
+    )
 
 
 def press_space(*, hold_ms: int = 60, use_scan_code: bool = True) -> bool:
