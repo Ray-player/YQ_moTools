@@ -14,7 +14,7 @@ python -m venv .venv
 .venv\Scripts\activate
 
 pip install -e ".[dev,build]"     # dev=pytest/ruff；build=PyInstaller（只跑程序可不装）
-pytest -q                          # 期望 415 项全绿
+pytest -q                          # 期望 540 项全绿（末尾偶见 offscreen 退出 segfault，可忽略）
 
 yqrec gui                          # 源码运行 GUI
 python tools/build_release.py      # 打包 → dist/YQ_moTools/YQ_moTools.exe（onedir，双击运行）
@@ -52,10 +52,13 @@ build/yqrec.spec PyInstaller 打包配置
 
 ## 当前状态
 
-**M3 收口（当前，tag `v0.1.0`）**：
+**v0.1.5（当前）**：
 
-- **UI**：日/夜双主题、三段竖排布局（键位状态 → 预览 → 录制内容），窗口几何与采样口径持久化
-- **截图**：`j-HDR`（默认，HDR 屏唯一颜色正确的路径）/ DXGI / GDI 三档，回退链 `hdr → dxgi → gdi`
-- **录制识别**：逐键基线 + weighted 判据；录制启动可选输入注入（`instruments.json` 的 `record_click`：0=关 / 1=激活目标窗口+模拟空格 / 2=模拟鼠标点击），详见 `docs/03` §5.1
-- **导出**：tick（默认）/ BetterGI midi / BetterGI yuanqin 三种，互转往返误差 ≤0.5ms；`tools/compare_sheets.py` 可做谱面互校
-- 质量：**415 项 pytest 全绿**；后续方向见 [02 §迭代记录](docs/02-计划-开发与协作.md)
+- **UI**：日/夜双主题、三段竖排布局（键位状态 → 预览 → 录制内容），窗口几何、乐器选择与采样口径持久化
+- **截图**：`j-HDR`（默认，HDR 屏唯一颜色正确的路径）/ DXGI / GDI 三档，回退链 `hdr → dxgi → gdi`，回退必提示
+- **录制识别**：逐键基线 + weighted 判据；录制启动可选输入注入（`record_click`：0=关 / 1=激活目标窗口+模拟空格 / 2=模拟鼠标点击），启动自动注入自检，日志写明注入目标与输入环境
+- **试听**：播放器式控制条（播放/暂停/快进快退 + 进度条拖动跳转）；试听刚录的谱面时键位灯随录制实况点亮（按下/弹起/按下时 Δ）
+- **导出**：tick（默认，支持延音 `A[ms]`，JSON 含 `type` / `Average_Delta` / `Min_Delta` 统计）/ BetterGI midi / BetterGI yuanqin 三种，互转往返误差 ≤0.5ms；`tools/compare_sheets.py` 可做谱面互校；曲谱语法速查见 [docs/07](docs/07-tick格式曲谱规则.md)
+- **乐器**：6 乐器参数内置（镜花之琴/老旧的诗琴实机可用；悠可琴/余音暂为仅预览），改 `instruments.json` 后 F5 热重载
+- **存档**：数据目录只认绝对路径并实测可写，写不进自动兜底（exe 同级 `data` → `%LOCALAPPDATA%`）并在消息区提示；存档位置可经 `instruments.json` 的 `archive_path` 配置（`Local` / `Temp` / 绝对路径）
+- 质量：**540 项 pytest 全绿**；后续方向见 [02 §迭代记录](docs/02-计划-开发与协作.md)
