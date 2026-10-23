@@ -201,6 +201,26 @@ def _roaming_from_registry() -> Path | None:
     return path if path.is_absolute() else None
 
 
+def probe_writable(path: Path | str) -> str | None:
+    """试写一个探测文件，返回 None 表示可写，否则返回错误说明。
+
+    光看 ACL 不够：实测（2026-10-23）`%APPDATA%\\YQ_moTools` 三个文件的 ACL 全是
+    `Administrator:(F)`，PowerShell 能写，但某些进程 `open(..., 'a')` 仍报
+    `PermissionError: [Errno 13]` —— 只有"真写一次"才靠得住。
+    """
+    import uuid
+
+    target_dir = Path(path)
+    probe = target_dir / f".write_probe_{uuid.uuid4().hex[:8]}"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
 def data_dir() -> Path:
     r"""数据目录（**绝对路径**，`%APPDATA%\YQ_moTools`）：设置 / 标定 / 日志都在它下面。
 

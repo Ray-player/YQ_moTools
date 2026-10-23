@@ -2517,20 +2517,28 @@ class MainWindow(QMainWindow):
             _log.warning("保存应用设置失败: %s", exc)
             self._set_error(f"保存设置失败：{exc}")
 
-    def show_startup_diagnostics(self, *, rows: list[tuple[str, object]], log_failed: bool) -> None:
-        """启动自检：把"设置 / 标定 / 日志到底落在哪"挂到消息区提示里，写不了就红字报。
+    def show_startup_diagnostics(
+        self, *, rows: list[tuple[str, object]], log_failed: bool, note: str = ""
+    ) -> None:
+        """启动自检：把"设置 / 标定 / 日志到底落在哪"挂到消息区提示里，写不了就弹窗报。
 
-        背景（2026-10-23 用户实机）：`%APPDATA%` 解析不出来时，旧版会把日志/设置静默写到
-        运行目录，界面上完全看不出来 —— 用户只能看到"窗口大小和乐器每次都被拽回旧值"。
-        现在路径每次都进日志，写不进去还会在界面上说一句，不用再靠猜。
+        背景（2026-10-23 用户实机）：`%APPDATA%` 写不进去时，旧版会把失败压成一行 warning，
+        而那行 warning 恰恰也写不进磁盘 —— 用户只能看到"窗口大小和乐器每次都被拽回旧值"。
+        现在路径每次都进日志，写不进去就**弹窗**（消息区那条小提示用户容易错过）。
         """
         self._startup_paths = [(label, str(path)) for label, path in rows]
         detail = "\n".join(f"{label}: {path}" for label, path in self._startup_paths)
-        if log_failed:
-            self._toast("日志文件写不进去：设置/标定也可能存不下来（把鼠标放这里看路径）", "error")
-            self._lbl_toast.setToolTip(detail)
-            return
         self._lbl_toast.setToolTip(detail)
+        if log_failed and not note:
+            note = "日志文件装不上（未能写入存档目录），设置/标定也可能存不下来。"
+        if not note:
+            return
+        self._toast("存档目录写入异常，详见弹窗（鼠标悬停可看全部路径）", "error")
+        QMessageBox.warning(
+            self,
+            "存档目录写入异常",
+            f"{note}\n\n当前实际使用的位置：\n{detail}",
+        )
 
     # -- 窗口尺寸记忆（用户要求：缩放过就沿用上次大小） -------------------- #
 

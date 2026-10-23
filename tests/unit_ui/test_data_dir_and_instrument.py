@@ -38,6 +38,16 @@ def test_data_dir_honours_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert data_dir() == tmp_path / "portable"
 
 
+def test_probe_writable_detects_bad_dir(tmp_path: Path) -> None:
+    """目标是个**文件**（无法当目录用）时必须报错，而不是假装可写。"""
+    from yqrec.config import probe_writable
+
+    assert probe_writable(tmp_path) is None, "正常目录应可写"
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    assert probe_writable(blocker) is not None
+
+
 # --------------------------------------------------------------------------- #
 # 2. 乐器选择持久化
 # --------------------------------------------------------------------------- #

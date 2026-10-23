@@ -80,11 +80,58 @@ def _file_log_path() -> str:
     return ""
 
 
+def _fallback_candidates() -> list[Path]:
+    """存档目录写不进去时的候选：exe 同级 `data/`、`%LOCALAPPDATA%\\YQ_moTools`。"""
+    out: list[Path] = []
+    try:
+        base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
+    except Exception:  # pragma: no cover
+        base = None
+    if base is not None:
+        out.append(base / "data")
+    local = os.environ.get("LOCALAPPDATA")
+    if local and Path(local).is_absolute():
+        out.append(Path(local) / "YQ_moTools")
+    return out
+
+
+def _ensure_writable_data_dir() -> str:
+    """开跑前先"真写一次"存档目录；写不进去就换一个能写的，并把原因返回给界面。
+
+    为什么必须实测：ACL 看着完全正常（`Administrator:(F)`）也可能 `open(...,'a')`
+    照样 `PermissionError`（2026-10-23 实机）。只查权限会给出"一切正常"的假结论。
+    """
+    from yqrec.config import data_dir, probe_writable
+
+    try:
+        primary = data_dir()
+    except Exception as exc:
+        return f"存档目录解析失败：{type(exc).__name__}: {exc}"
+    error = probe_writable(primary)
+    if error is None:
+        return ""
+    for candidate in _fallback_candidates():
+        if probe_writable(candidate) is None:
+            os.environ["YQREC_DATA_DIR"] = str(candidate)
+            return (
+                f"默认存档目录写不进去：\n{primary}\n原因：{error}\n\n"
+                f"本次已改用：\n{candidate}\n"
+                "（设置/标定/日志都会存在这里；想让数据回到 %APPDATA%，请把该文件夹"
+                "加入安全软件白名单，或删除 %APPDATA%\\YQ_moTools 后重开）"
+            )
+    return (
+        f"存档目录写不进去：\n{primary}\n原因：{error}\n\n"
+        "备选目录也写不进去，本次的设置/标定/日志都无法保存。"
+        "请检查安全软件（360 等）拦截，或把程序放到有写权限的目录。"
+    )
+
+
 def run_gui(argv: list[str] | None = None) -> int:
     """启动主窗，返回 Qt 事件循环退出码。"""
     enable_dpi_awareness()
     prepare_assets_path()
     _ensure_std_streams()
+    data_note = _ensure_writable_data_dir()
     log_dir_text = ""
     log_failed = False
     try:
@@ -119,13 +166,15 @@ def run_gui(argv: list[str] | None = None) -> int:
 
     window = MainWindow()
     window.show()
-    _report_paths(window, log_failed=log_failed, log_dir_text=log_dir_text)
+    _report_paths(window, log_failed=log_failed, log_dir_text=log_dir_text, note=data_note)
     _log.info("GUI 启动完成")
     return int(app.exec())
 
 
-def _report_paths(window: object, *, log_failed: bool, log_dir_text: str = "") -> None:
-    """启动自检：把四处路径写进日志；写不了就在界面上说清楚，不再静默。
+def _report_paths(
+    window: object, *, log_failed: bool, log_dir_text: str = "", note: str = ""
+) -> None:
+    """启动自检：把路径写进日志；写不了就在界面上说清楚（弹窗，不再静默）。
 
     "东西写不进 C 盘存档"这类问题在旧版里是完全无声的：日志 handler 装不上、
     settings.json 写失败都只留一行 warning，而那行 warning 本身就写不进磁盘。
@@ -152,9 +201,11 @@ def _report_paths(window: object, *, log_failed: bool, log_dir_text: str = "") -
     ]
     for label, path in rows:
         _log.info("路径[%s] = %s", label, path)
+    if note:
+        _log.warning("存档目录不可写：%s", note.replace("\n", " "))
     report = getattr(window, "show_startup_diagnostics", None)
     if callable(report):
-        report(rows=rows, log_failed=log_failed)
+        report(rows=rows, log_failed=log_failed, note=note)
 
 
 
