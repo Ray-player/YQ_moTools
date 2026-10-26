@@ -110,7 +110,9 @@ class KeyPlayer:
 
     - `sink` 需实现 `key_down(key)` / `key_up(key)` / `release_all()` / `ready()`；
     - `on_note(event, index)` 在每次**按下**时回调（编辑器高亮用，与 `Player` 同语义）；
-    - `on_interrupt(reason)` 在"目标窗口不可注入"时回调一次，随后自动停止。
+    - `on_interrupt(reason)` 在"目标窗口没了、彻底投不出去"时回调一次，随后自动停止；
+    - `on_blocked(blocked)` 在"暂时发不了键"（前台模式下当前激活窗口是本程序）时回调，
+      状态变化才回调一次；**演奏不中断**，时间轴照走（M6d）。
     """
 
     def __init__(
@@ -134,6 +136,8 @@ class KeyPlayer:
         self.on_state: Callable[[PlayerState], None] | None = None
         self.on_progress: Callable[[float], None] | None = None
         self.on_interrupt: Callable[[str], None] | None = None
+        self.on_blocked: Callable[[bool], None] | None = None
+        self._blocked = False
 
     # -- 属性 -------------------------------------------------------------- #
 
@@ -171,6 +175,7 @@ class KeyPlayer:
             return
         self._stop.clear()
         self._pause.clear()
+        self._blocked = False
         self._set_state(PlayerState.PLAYING)
         self._thread = threading.Thread(
             target=self._run, args=(start_ms, loop), name="yqrec-keyplayer", daemon=True
@@ -213,6 +218,17 @@ class KeyPlayer:
             try:
                 self.on_interrupt(reason)
             except Exception:  # 回调只是提示，绝不能反过来打断线程收尾
+                pass
+
+    def _note_blocked(self, blocked: bool) -> None:
+        """记录"暂时发不出键"的状态翻转（只在变化时通知，别每拍刷一次）。"""
+        if blocked == self._blocked:
+            return
+        self._blocked = blocked
+        if self.on_blocked:
+            try:
+                self.on_blocked(blocked)
+            except Exception:  # 回调只是提示，不能反过来打断时间轴
                 pass
 
     def _held_at(self, at_ms: float, *, strict: bool = False) -> tuple[str, ...]:
@@ -258,8 +274,15 @@ class KeyPlayer:
                             self._restore_held(self._last_at_ms)
                         time.sleep(min(0.005, max(0.0, target - time.perf_counter())))
                     if not self._sink.ready():
-                        self._interrupt("目标窗口不在前台（或已关闭）")
-                        return
+                        if getattr(self._sink, "interrupt_when_blocked", True):
+                            self._interrupt("目标窗口已关闭 —— 演奏已停止")
+                            return
+                        # 前台通道：当前激活窗口是本程序 → 这一拍**不发键**，但时间轴照走。
+                        # 若在这里暂停，用户点「演奏」后前台永远是我们自己，前台模式就再也
+                        # 起不来了（M6d 用户反馈）。抬不掉的键由 sink 记账、切回来补发。
+                        self._note_blocked(True)
+                    else:
+                        self._note_blocked(False)
                     if action.down:
                         self._sink.key_down(action.key)
                     else:

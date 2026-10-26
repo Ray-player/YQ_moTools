@@ -136,7 +136,7 @@ def test_target_falls_back_to_window_below(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 def test_foreground_mode_never_steals_focus(window, monkeypatch: pytest.MonkeyPatch) -> None:
-    """前台模式：当前激活是本程序 → 不抢焦点、只判"不能发"，UI 停在暂停态。"""
+    """前台模式：不抢焦点；当前激活是本程序时**逐拍跳过**，但演奏不停（M6d）。"""
     from yqrec import inputsim
 
     win, app = window
@@ -146,40 +146,79 @@ def test_foreground_mode_never_steals_focus(window, monkeypatch: pytest.MonkeyPa
     calls: list[int] = []
     monkeypatch.setattr(inputsim, "activate_window", lambda hwnd: calls.append(hwnd) or True)
     monkeypatch.setattr(inputsim, "foreground_window", lambda: int(win.winId()))
-    assert win._rearm_key_sink() is False, "当前激活是本程序 → 本帧不发键"
+    monkeypatch.setattr(inputsim, "is_own_window", lambda h: int(h) == int(win.winId()))
+    assert sink.ready() is False, "激活的是本程序 → 不发键"
+    assert win._can_inject_now() is True, "但绝不能因此暂停（否则前台模式永远起不来）"
     assert calls == [], "用户明确要求不要替人抢焦点"
 
     monkeypatch.setattr(inputsim, "foreground_window", lambda: 0x1234)
-    assert win._rearm_key_sink() is True, "游戏在前台 → 可以发"
+    monkeypatch.setattr(inputsim, "is_own_window", lambda h: False)
+    assert sink.ready() is True, "切到别的窗口就能发（前台语义 = 发给当前激活窗口）"
     win._key_sink = None
     win.close()
 
 
-def test_start_playback_pauses_when_focus_not_target(
+def test_foreground_mode_requires_no_target_window(window, monkeypatch) -> None:
+    """前台不需要事先知道目标窗口：句柄为 0 也照样能造出通道（不强制先框选）。"""
+    from yqrec import inputsim
+
+    win, app = window
+    win._config.ui.key_play_mode = "foreground"
+    monkeypatch.setattr(win, "_key_target_hwnd", lambda: 0)
+    sink = win._make_key_sink()
+    assert isinstance(sink, inputsim.ForegroundKeys), "前台不该因为没目标就报错"
+
+    win._config.ui.key_play_mode = "background"
+    assert win._make_key_sink() is None, "后台没目标窗口时确实投不出去 → 报错"
+    win.close()
+
+
+def test_start_playback_keeps_playing_when_own_window_active(
     window, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """前台模式起播时抢不到目标 → 搭好台停在暂停态，且一个音都不发。"""
+    """点「演奏」时前台必然是本程序 —— 必须直接起播，不许暂停（M6d 用户反馈）。"""
     from yqrec import inputsim
 
     win, app = window
     win._config.ui.key_play_mode = "foreground"
     monkeypatch.setattr(win, "_make_key_sink", lambda: inputsim.ForegroundKeys(0x1234))
     monkeypatch.setattr(inputsim, "foreground_window", lambda: int(win.winId()))
+    monkeypatch.setattr(inputsim, "is_own_window", lambda h: True)
 
     win._btn_play_keys.click()
     app.processEvents()
-    assert win._play_mode is True, "仍然进入演奏模式（不是报错退出）"
-    assert win._paused is True, "停在暂停态"
+    assert win._play_mode is True
+    assert win._paused is False, "前台模式不许因为'当前激活是本程序'就暂停"
     played = [c for c in win.calls if c[0] in ("play_from", "resume")]
-    assert played == [], f"不该起播（会先打出几个音）: {played}"
+    assert played, "必须真的起播：用户切到游戏窗口后剩下的音要接上"
     win._stop_playback()
+    win.close()
+
+
+def test_resume_does_not_need_rearm(window, monkeypatch: pytest.MonkeyPatch) -> None:
+    """暂停后按 ▶：前台模式也要无条件继续（焦点对不对由注入层逐拍判断）。"""
+    from yqrec import inputsim
+
+    win, app = window
+    win._config.ui.key_play_mode = "foreground"
+    win._key_sink = inputsim.ForegroundKeys(0x1234)
+    monkeypatch.setattr(inputsim, "foreground_window", lambda: int(win.winId()))
+    monkeypatch.setattr(inputsim, "is_own_window", lambda h: True)
+
+    win._play_kind = "keys"
+    win._play_mode = True
+    win._paused = True
+    win._cursor = win._paused_at = 0
+    win._toggle_pause()
+    assert win._paused is False, "继续必须生效"
+    win._key_sink = None
+    win._play_mode = False
     win.close()
 
 
 def test_entry_mode_button_hidden_while_playing(window, monkeypatch: pytest.MonkeyPatch) -> None:
     win, app = window
     monkeypatch.setattr(win, "_make_key_sink", RecordingSink)
-    monkeypatch.setattr(win, "_rearm_key_sink", lambda: True)
 
     win._btn_play_keys.click()
     app.processEvents()
@@ -202,7 +241,6 @@ def test_entry_mode_uses_background_sink(window, monkeypatch: pytest.MonkeyPatch
         return RecordingSink()
 
     monkeypatch.setattr(win, "_make_key_sink", fake_sink)
-    monkeypatch.setattr(win, "_rearm_key_sink", lambda: True)
     win._btn_play_keys.click()
     app.processEvents()
     assert made == ["background"]
@@ -223,7 +261,6 @@ def test_click_swaps_entry_for_play_bar(window, monkeypatch: pytest.MonkeyPatch)
     win, app = window
     sink = RecordingSink()
     monkeypatch.setattr(win, "_make_key_sink", lambda: sink)
-    monkeypatch.setattr(win, "_rearm_key_sink", lambda: True)
 
     win._btn_play_keys.click()
     app.processEvents()
@@ -242,7 +279,6 @@ def test_stop_returns_to_both_entries(window, monkeypatch: pytest.MonkeyPatch) -
     win, app = window
     sink = RecordingSink()
     monkeypatch.setattr(win, "_make_key_sink", lambda: sink)
-    monkeypatch.setattr(win, "_rearm_key_sink", lambda: True)
 
     win._btn_play_keys.click()
     app.processEvents()

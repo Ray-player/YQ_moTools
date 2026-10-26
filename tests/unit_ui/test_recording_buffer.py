@@ -293,3 +293,19 @@ def spec_fwzs_stub() -> InstrumentSpec:
     from yqrec.instruments import load_instrument
 
     return load_instrument("fwzs")
+
+
+def test_tick_text_from_score_can_drop_sustain() -> None:
+    """无延音乐器（风物之诗琴）渲染 tick 时不写 `[ms]`（M6d 用户要求）。
+
+    外部谱（BGI midi / yuanqin）每个音都带按住时长，照搬到编辑框里就变成
+    `A[500]620B` 这样一串噪音 —— 目标乐器不支持延音时它毫无意义。
+    """
+    score = Score(
+        events=[
+            NoteEvent(keys=("A",), onset_ms=0.0, sustain_ms=500.0),
+            NoteEvent(keys=("B",), onset_ms=620.0),
+        ]
+    )
+    assert tick_text_from_score(score) == "A[500]620B"
+    assert tick_text_from_score(score, sustained=False) == "A620B"

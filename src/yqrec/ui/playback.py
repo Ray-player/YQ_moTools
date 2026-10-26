@@ -65,7 +65,11 @@ class PlaybackController(QObject):
     """`"playing"` / `"idle"`（播完或手动停止都回 idle）。"""
 
     interrupted = Signal(str)
-    """演奏被迫中断（目标窗口跑焦点 / 被关掉）。参数是给人看的一句话。"""
+    """演奏被迫中断（目标窗口被关掉 / 后台投递失效）。参数是给人看的一句话。"""
+
+    keys_blocked = Signal(bool)
+    """演奏**暂时发不出键**（前台模式下当前激活窗口是本程序）：`True` 开始被挡、
+    `False` 恢复。演奏不停，时间轴照走（M6d）。"""
 
     def __init__(self, parent: QObject | None = None, *, audio_enabled: bool = True) -> None:
         super().__init__(parent)
@@ -253,6 +257,7 @@ class PlaybackController(QObject):
                     return False
                 player: Player | KeyPlayer = KeyPlayer(self._score, self._sink, speed=1.0)
                 player.on_interrupt = self._on_key_interrupt
+                player.on_blocked = self._on_key_blocked
             else:
                 player = Player(
                     self._score,
@@ -324,6 +329,10 @@ class PlaybackController(QObject):
     def _on_key_interrupt(self, reason: str) -> None:
         """演奏线程发现目标窗口不可注入 → 转成 Qt 信号（在播放线程里被调用）。"""
         self.interrupted.emit(str(reason))
+
+    def _on_key_blocked(self, blocked: bool) -> None:
+        """演奏线程报告"这一阵发不出键"（跨线程 → 队列信号，UI 只做提示）。"""
+        self.keys_blocked.emit(bool(blocked))
 
     def _emit_note(self, event_index: int) -> None:
         """播放线程回调 → `events` 下标换成和弦序号再发信号。"""

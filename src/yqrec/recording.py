@@ -121,9 +121,18 @@ def tick_text(notes: tuple[RecordedNote, ...] | list[RecordedNote]) -> str:
     return "".join(parts)
 
 
-def _render_chord(keys: tuple[str, ...], sustain_ms: float) -> str:
-    """`("A",) + 800` → `"A[800]"`；延音不到 50ms 时只有字母。"""
+def _render_chord(
+    keys: tuple[str, ...], sustain_ms: float, *, sustained: bool = True
+) -> str:
+    """`("A",) + 800` → `"A[800]"`；延音不到 50ms 时只有字母。
+
+    `sustained=False` 用于**不支持延音的乐器**（风物之诗琴这类）：不管谱面里
+    记了多长的按住时间，渲染出来都只有字母 —— 那些 `[ms]` 在游戏里没有意义，
+    留在编辑框里只会让谱面变成一串 `A[500]120B` 的噪音。
+    """
     token = "".join(keys)
+    if not sustained:
+        return token
     value = int(round(float(sustain_ms)))
     if value >= SUSTAIN_TEXT_MIN_MS:
         token += f"[{value}]"
@@ -245,12 +254,16 @@ def tick_spans(text: str) -> list[tuple[int, int]]:
     return [(t.start, t.end) for t in scan_tick_tokens(text)]
 
 
-def tick_text_from_score(score: Score) -> str:
+def tick_text_from_score(score: Score, *, sustained: bool = True) -> str:
     """`Score` → 毫秒间隔 tick 文本（`onset_ms` 取整后做差分）。
 
     用于显示**非录制来源**的谱面（如读取 BetterGI 曲谱），以及把用户手打的
     文本/外部谱面统一成同一种落盘形式。差分基于**累计已输出毫秒**，
     因此整首谱的绝对时刻误差 ≤0.5ms，不会逐音累积。
+
+    `sustained=False`：目标乐器**不支持延音**（`sustain_ms == 0`，如风物之诗琴）时
+    不写 `[ms]` 后缀。外部谱（midi / yuanqin）里每个音的按住时长对我们没有意义，
+    照搬会让编辑框里全是 `A[500]120B` —— 见 M6d 用户反馈。
     """
     notes = [e for e in score.events if isinstance(e, NoteEvent)]
     if not notes:
@@ -262,7 +275,7 @@ def tick_text_from_score(score: Score) -> str:
         gap = max(0, target - emitted)  # 首音也写：保留开头的休止
         if gap:
             parts.append(str(gap))
-        parts.append(_render_chord(tuple(event.keys), event.sustain_ms))
+        parts.append(_render_chord(tuple(event.keys), event.sustain_ms, sustained=sustained))
         emitted += gap
     return "".join(parts)
 

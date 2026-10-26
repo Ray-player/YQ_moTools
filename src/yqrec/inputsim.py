@@ -7,7 +7,9 @@
   激活流程抄 MAA ``ForegroundUtils.h`` 的三段式（提层 → SetForegroundWindow
   → 复核，失败再 TOPMOST↔NOTOPMOST 强提）；
 - **琴键演奏的字母键按下/抬起**（`ForegroundKeys` / `BackgroundKeys`，M5）：
-  前台走 SendInput + 扫描码，后台走 ``PostMessage(WM_KEYDOWN/UP)`` 到目标窗口，
+  前台走 SendInput + 扫描码，打给**当前激活窗口**（激活的是本进程就这一拍不发，
+  但**不中断**演奏，见 `interrupt_when_blocked`）；后台走
+  ``PostMessage(WM_KEYDOWN/UP)`` 到目标窗口，目标没了只能中断。
   两条通道的语义与 BetterGI 的 ``SendInputChannel`` / ``PostMessageChannel`` 对齐。
 
 后续要扩展时保持三条约定：
@@ -600,37 +602,58 @@ def _key_lparam(vk: int, key_up: bool) -> int:
 
 
 class ForegroundKeys:
-    """前台通道：SendInput + 扫描码，按键打进**当前前台窗口**。
+    """前台通道：SendInput + 扫描码，按键打进**当前激活窗口**。
 
-    `target_hwnd` 非 0 时，每次注入前都复核前台是否还是它（`ready()`）——
-    前台注入最坏的情况不是"没反应"，而是**打进别的窗口**：用户一个 Alt+Tab，
-    接下来那串字母就全进了浏览器/聊天框；要命的是打回本程序的谱面文本框时，
-    谱面会被当场改坏。所以"焦点不在目标窗口"一律视为不可注入。
+    语义（M6d 用户定义）：谁在前台就打给谁，程序**不替你抢焦点**；唯一必须挡住的是
+    **打回本程序** —— 那串字母会进谱面文本框，当场改坏谱面。所以 `ready()` 只看
+    "当前激活窗口是不是我们自己的进程"，`target_hwnd` 只用于展示/日志。
+
+    挡住时**不中断演奏**，只是这一拍不发键（`interrupt_when_blocked = False`）：
+    点「演奏」的瞬间前台必然是本程序，若因此暂停，前台模式永远起不来 ——
+    用户切到游戏窗口后按键要能自然接上。
     """
 
     mode = "foreground"
+    interrupt_when_blocked = False
+    """发不出键时**不中断**演奏，只静默跳过（见类文档）。"""
 
     def __init__(self, target_hwnd: int = 0) -> None:
         self.target_hwnd = int(target_hwnd or 0)
         self._pressed: set[str] = set()
+        self._pending_up: set[str] = set()
+        """焦点不在目标窗口时没送出去的抬起（切回来后补发，见 `_flush_pending_up`）。"""
         self._lock = threading.Lock()
 
     def describe(self) -> str:
-        return f"前台 SendInput → {describe(self.target_hwnd)}"
+        if self.target_hwnd:
+            return f"前台 SendInput（当前激活窗口，目标 {describe(self.target_hwnd)}）"
+        return "前台 SendInput（当前激活窗口）"
 
     def ready(self) -> bool:
-        """当前是否还该注入（焦点是否仍在目标窗口）。"""
-        if not self.target_hwnd:
-            return True
-        return same_root_window(foreground_window(), self.target_hwnd)
+        """现在能不能发键：有激活窗口，且**不是本程序**。"""
+        foreground = foreground_window()
+        return bool(foreground) and not is_own_window(foreground)
+
+    def _flush_pending_up(self) -> None:
+        """把"当时没送出去的抬起"补发掉（调用方已确认 `ready()`）。
+
+        焦点离开游戏后 `SendInput` 的 up 只会打到别的窗口，游戏那边就以为键还按着；
+        回到游戏时先补这些 up，避免琴键卡死。多出来的 up 对游戏没有任何副作用。
+        """
+        for letter in list(self._pending_up):
+            _send_key(virtual_key(letter), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
+            self._pressed.discard(letter)
+            self._pending_up.discard(letter)
 
     def key_down(self, key: str) -> bool:
         letter = _letter(key)
         with self._lock:
-            if letter in self._pressed:  # 同键重复 down 会被游戏当成系统自动重复，丢掉
-                return True
             if not self.ready():
                 return False
+            if self._pending_up:
+                self._flush_pending_up()
+            if letter in self._pressed:  # 同键重复 down 会被游戏当成系统自动重复，丢掉
+                return True
             if not _send_key(virtual_key(letter), KEYEVENTF_SCANCODE):
                 return False
             self._pressed.add(letter)
@@ -641,8 +664,11 @@ class ForegroundKeys:
         with self._lock:
             if letter not in self._pressed:
                 return True
-            # 抬起**无条件**发：up 不会输入字符，打到别的窗口也没危害；
-            # 反过来漏发会把游戏里的键一直按住（换乐器/退出演奏时尤其明显）。
+            if not self.ready():
+                # 现在发 up 只会打到别的窗口（游戏里那键还按着）→ 记账，切回来补发。
+                # 注意**不从 `_pressed` 里删**：那键在游戏里确实还是按下状态。
+                self._pending_up.add(letter)
+                return False
             ok = _send_key(virtual_key(letter), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
             self._pressed.discard(letter)
             return ok
@@ -652,6 +678,7 @@ class ForegroundKeys:
             for letter in list(self._pressed):
                 _send_key(virtual_key(letter), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
             self._pressed.clear()
+            self._pending_up.clear()
 
     def force_release(self, keys) -> None:
         """对给定键**无条件**补发一次抬起（收尾保险）。
@@ -684,6 +711,8 @@ class BackgroundKeys:
     """
 
     mode = "background"
+    interrupt_when_blocked = True
+    """目标窗口没了就**只能**停（没地方投递），交 UI 停在暂停态（见 `KeyPlayer._run`）。"""
 
     def __init__(self, hwnd: int) -> None:
         self.hwnd = int(hwnd or 0)

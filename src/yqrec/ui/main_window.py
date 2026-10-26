@@ -133,6 +133,12 @@ BGI_YQ_FORMAT = "bgi_yuanqin"
 BGI_FORMATS: dict[str, str] = {BGI_MIDI_FORMAT: "midi", BGI_YQ_FORMAT: "yuanqin"}
 """下拉标识 → BGI 的 `type` 字段。"""
 
+DEFAULT_INSTRUMENT_ID = "fwzs"
+"""读取外部谱面时"文件没标乐器"的默认乐器（风物之诗琴）。
+
+它的 `sustain_ms == 0`（无延音），所以这类谱面转出来的 tick 文本不带 `[ms]` 后缀。
+"""
+
 PROGRESS_TICK_MS = 40
 """试听进度条刷新间隔（ms）：40 ≈ 25fps，够连续又不白烧主线程。"""
 
@@ -271,6 +277,8 @@ class MainWindow(QMainWindow):
         self._key_interrupted = False
         """演奏刚被"注入不下去"打断（M6c）：用来区分**中断**与**自然播完** —— 两者都是
         `idle`，但中断要停在暂停态等用户切回窗口，只有真播完才退出演奏模式。"""
+        self._keys_blocked = False
+        """前台演奏当前"发不出键"（激活窗口是本程序，M6d）：只影响提示，不暂停。"""
         self._last_external_hwnd = 0
         """最近一次"不是本程序"的前台窗口（M6c，1s 采样，**不落盘**）。
 
@@ -330,6 +338,7 @@ class MainWindow(QMainWindow):
         self._playback.note_played.connect(self._highlight_note)
         self._playback.state_changed.connect(self._on_playback_state)
         self._playback.interrupted.connect(self._on_key_interrupted)
+        self._playback.keys_blocked.connect(self._on_keys_blocked)
         self._load_startup_instrument()
         _log.info("捕获后端可用性: %s", backend_availability())
         self._load_profile()
@@ -2484,7 +2493,7 @@ class MainWindow(QMainWindow):
                 + (
                     "当前：后台 PostMessage（不用切窗口，边弹边操作本程序）"
                     if mode == inputsim.BackgroundKeys.mode
-                    else "当前：前台 SendInput（发给当前激活窗口，本程序在前台时不发）"
+                    else "当前：前台 SendInput（发给当前激活窗口；本程序在前台时不发键、不暂停）"
                 )
             )
         elif self._worker is not None:
@@ -2493,6 +2502,17 @@ class MainWindow(QMainWindow):
         else:
             self._btn_play.setToolTip("需要先录制或读取一份谱面")
             self._btn_play_keys.setToolTip("需要先录制或读取一份谱面")
+
+    def _instrument_sustains(self, instrument: str) -> bool:
+        """该乐器是否**支持延音**（`sustain_ms > 0`）。
+
+        文件没标乐器（空 id）或 id 不在表里 → 按风物之诗琴处理（不支持延音）。
+        这决定读入 midi / yuanqin 后写进编辑框的 tick 文本要不要带 `[ms]` 后缀。
+        """
+        spec = self._instruments.get(instrument or DEFAULT_INSTRUMENT_ID)
+        if spec is None:
+            spec = self._instruments.get(DEFAULT_INSTRUMENT_ID)
+        return bool(spec is not None and float(spec.sustain_ms) > 0)
 
     def _load_score_file(self) -> None:
         """从磁盘读取谱面（自动识别 YQ_moTools JSON / BetterGI 曲谱），可直接试听。"""
@@ -2515,10 +2535,18 @@ class MainWindow(QMainWindow):
             if bgi_sheet.is_bgi_sheet(record):
                 source = "bgi"
                 score = bgi_sheet.parse_sheet(record)
-                text = tick_text_from_score(score)  # 显示用：onset→毫秒文本
                 instrument = bgi_sheet.local_instrument_id(
                     str(record.get("instrument") or "")
                 ) or ""
+                # 文本按**目标乐器是否支持延音**渲染（M6d 用户要求）：风物之诗琴这类
+                # `sustain_ms == 0` 的乐器，谱面里记的按住时长没有意义，写成
+                # `A[500]120B` 只是噪音 → 输出纯字母 tick；只有延音乐器才留 `[ms]`。
+                # 文件里没标乐器 = 按风物之诗琴处理（默认无延音）。
+                sustained = self._instrument_sustains(instrument)
+                text = tick_text_from_score(score, sustained=sustained)  # onset → 毫秒文本
+                # 文本是唯一来源：Sustain 被裁掉的话谱面也要跟着裁，否则
+                # 试听/演奏仍按文件里的旧延音走，与编辑框对不上。
+                score = bgi_sheet.score_from_tick_text(text)
             else:
                 score = score_from_record(record)
                 text = record_tick_text(record)
@@ -2603,20 +2631,20 @@ class MainWindow(QMainWindow):
             return False
         self._key_sink = sink
         self._playback.load(score, self._spec, mode="keys", sink=sink)
-        # 前台模式按用户要求**不替人抢焦点**：能不能发键先问一句，不能就搭好台停在暂停态
-        can_inject = self._rearm_key_sink()
-        self._enter_play_mode(0, kind="keys", autoplay=can_inject)
-        if can_inject:
-            self._flash_status(f"演奏中（{sink.describe()}）")
+        if not self._can_inject_now():  # 后台窗口没了：别搭台，直接报错
+            self._key_sink = None
+            return False
+        # 前台模式一律直接起播：当前激活的是本程序时按键会逐拍跳过（不暂停），
+        # 用户切到游戏窗口后就接上了 —— 这也是前台模式唯一能正常工作的方式。
+        self._enter_play_mode(0, kind="keys")
+        self._flash_status(f"演奏中（{sink.describe()}）")
         return True
 
-    def _enter_play_mode(
-        self, start: int = 0, *, kind: str = "audio", autoplay: bool = True
-    ) -> None:
+    def _enter_play_mode(self, start: int = 0, *, kind: str = "audio") -> None:
         """切到播放模式：入口按钮原位换成控制条，并从头（或指定和弦）开始播。
 
-        `autoplay=False` 只搭台不发声（停在暂停态）：前台模式下当前激活窗口不是目标时
-        用它 —— "输入不生效"要表现成**安静的暂停**，而不是先打出去几个音再中断。
+        一律起播：M6d 起前台模式发不出键就**逐拍跳过**（演奏继续），所以不再需要
+        "只搭台不起播"那条路（旧 `autoplay=False` 已删）。
         """
         self._play_mode = True
         self._play_kind = "keys" if kind == "keys" else "audio"
@@ -2636,17 +2664,10 @@ class MainWindow(QMainWindow):
         self._play_spacer.changeSize(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
         self._actions_row.invalidate()  # 让出留白给进度条
         self._highlight_at(self._cursor)
-        if autoplay:
-            if not self._playback.play_from(self._cursor):
-                self._set_error("播放失败：谱面为空")
-                self._exit_play_mode()
-                return
-        else:
-            # 只搭台：停在暂停态，等高亮处继续（用户切好窗口后点 ▶）
-            self._paused = True
-            self._paused_at = self._cursor
-            self._parked_ms = self._playback.onset_of(self._cursor)
-            self._highlight_at(self._cursor)
+        if not self._playback.play_from(self._cursor):
+            self._set_error("播放失败：谱面为空")
+            self._exit_play_mode()
+            return
         self._sync_play_buttons()
         self._sync_progress()
         self._progress_timer.start()
@@ -2723,53 +2744,46 @@ class MainWindow(QMainWindow):
             self._last_external_hwnd = int(hwnd)
 
     def _make_key_sink(self) -> inputsim.ForegroundKeys | inputsim.BackgroundKeys | None:
-        """按当前设置造注入通道；条件不满足时提示并返回 None。"""
+        """按当前设置造注入通道；条件不满足时提示并返回 None。
+
+        两种通道对"目标窗口"的依赖完全不同（M6d）：
+
+        - **前台**：`SendInput` 打给**当前激活窗口**，不需要事先知道目标 ——
+          所以窗口句柄为 0 也照常起播（不强制先框选 / 先切窗口）；
+        - **后台**：`PostMessage` 必须有个活着的窗口，取不到就只能报错。
+        """
         mode = str(self._config.ui.key_play_mode or "background").lower()
         hwnd = self._key_target_hwnd()
-        if hwnd == 0:
-            self._set_error(
-                "找不到要演奏的窗口：先打开游戏窗口（或先「框选区域」把琴键圈出来）"
-            )
-            return None
-        hint = inputsim.injection_hint(hwnd)
-        if hint:  # UIPI：目标提权而本程序没有 → 注入会被系统静默丢弃（两条通道都一样）
-            self._set_error(hint)
-            return None
+        if mode == inputsim.BackgroundKeys.mode:
+            if not hwnd or not inputsim.is_window(hwnd):
+                self._set_error(
+                    "后台投递需要一个目标窗口：先打开游戏窗口（或先「框选区域」圈出琴键范围）"
+                )
+                return None
+        if hwnd:
+            hint = inputsim.injection_hint(hwnd)
+            if hint:  # UIPI：目标提权而本程序没有 → 注入会被系统静默丢弃（两条通道都一样）
+                self._set_error(hint)
+                return None
         return inputsim.make_key_sink(mode, hwnd)
 
-    def _rearm_key_sink(self) -> bool:
-        """确认"现在能不能真的发键"，能就 True；不能只提示、**不抢焦点**。
+    def _can_inject_now(self) -> bool:
+        """现在起播/继续有没有意义：**只拦"真的投不出去"的情况，不拦前台**。
 
-        前台模式的语义按用户要求定为「打进当前激活窗口」：
-        - 当前激活的就是目标 → 可以发；
-        - 当前激活的是**本程序**（或别的窗口）→ 本帧**不生效**，并且**不替用户
-          `SetForegroundWindow`**（旧版会硬抢，用户明确不要这个行为）。
-          UI 侧据此停在暂停态，等用户自己切回游戏再点播放。
-
-        后台模式只要求目标窗口还活着（`IsWindow`），与前台是谁无关。
+        - 后台：目标窗口没了就投不了 → 返回 False，UI 停在暂停态；
+        - 前台：永远返回 True。按键发给当前激活窗口，激活的是本程序时由注入层
+          **逐拍跳过**（`ForegroundKeys.ready()`），演奏继续走 —— 用户切到游戏后
+          自然接上。这里若返回 False 并暂停，前台模式就永远起不来
+          （点「演奏」时前台必然是本程序，M6d 用户反馈的就是这一点）。
         """
         sink = self._key_sink
-        if sink is None:  # 音频试听没有注入通道，这一关直接放行
+        if sink is None:  # 音频试听没有注入通道
             return True
-        if sink.mode == inputsim.BackgroundKeys.mode:
-            if sink.ready():
-                return True
-            self._set_error("目标窗口已关闭（后台投递需要窗口还在）—— 演奏暂停，重开窗口后再点播放")
-            return False
-        hwnd = int(getattr(sink, "target_hwnd", 0) or 0)
-        if hwnd == 0:
+        if sink.mode != inputsim.BackgroundKeys.mode:
             return True
-        fg = inputsim.foreground_window()
-        if inputsim.same_root_window(fg, hwnd):
+        if sink.ready():
             return True
-        if inputsim.is_own_window(fg):
-            self._flash_status(
-                "当前激活窗口是本程序 —— 前台模式不发键（切到游戏后点 ▶ 继续）"
-            )
-        else:
-            self._flash_status(
-                "当前激活的不是演奏目标 —— 前台模式不发键（切回游戏后点 ▶ 继续）"
-            )
+        self._set_error("目标窗口已关闭（后台投递需要窗口还在）—— 重开窗口后再点播放")
         return False
 
     def _sync_key_mode_button(self) -> None:
@@ -2795,8 +2809,8 @@ class MainWindow(QMainWindow):
             if background
             else (
                 "点「演奏」时：前台 SendInput\n"
-                "· 发给**当前激活的那个窗口**；激活的是本程序就不发键（不会打错地方）\n"
-                "· 不用先框选区域，但演奏时游戏窗口得在最前面\n"
+                "· 发给**当前激活的那个窗口**；激活的是本程序就不发键（演奏照走，不会打错地方）\n"
+                "· 不用先框选区域，演奏中游戏窗口留在最前面即可\n"
                 "点一下改成「后台 PostMessage」"
             )
         )
@@ -2812,8 +2826,8 @@ class MainWindow(QMainWindow):
             if background
             else (
                 "当前：前台 SendInput（发给当前激活窗口）\n"
-                "· 激活的不是游戏时**不发键**（只暂停，不会打错地方）\n"
-                "· 不抢焦点：自己点一下游戏窗口，再按 ▶ 继续\n"
+                "· 激活的是本程序时**不发键、也不暂停**，切到游戏后接着弹\n"
+                "· 不抢焦点：自己点一下游戏窗口就行\n"
                 "点一下切到「后台 PostMessage」（从当前位置继续）"
             )
         )
@@ -2864,8 +2878,8 @@ class MainWindow(QMainWindow):
         self._sync_key_mode_button()
         self._cursor = ordinal
         self._parked_ms = head
-        # 抢不到前台就退成"暂停态"（不退出模式）：用户手动点回游戏再按播放即可
-        was_playing = was_playing and self._rearm_key_sink()
+        # 后台窗口没了就退成"暂停态"（不退出模式）；前台恒可继续
+        was_playing = was_playing and self._can_inject_now()
         if not self._playback.play_from(ordinal):
             self._stop_playback()
             return
@@ -2878,11 +2892,11 @@ class MainWindow(QMainWindow):
         self._flash_status(f"已切到{sink.describe()}")
 
     def _on_key_interrupted(self, reason: str) -> None:
-        """演奏线程报告"注入不下去了"（焦点跑了 / 窗口关了）→ **停在暂停态**，不退出模式。
+        """演奏线程报告"彻底投不出去了"（后台目标窗口关闭）→ **停在暂停态**，不退出模式。
 
-        用户要求「当前激活窗口不是游戏时就别发键」，语义是"安静地不发"而不是报错收摊：
+        前台模式不会走到这里：那一路是"逐拍跳过、演奏继续"（`_on_keys_blocked`）。
         把播放头停在最后高亮的和弦上，随后到来的 idle 信号由 `_key_interrupted` 拦下
-        （见 `_on_playback_state`），用户切回游戏点 ▶ 就能从这儿接着弹。
+        （见 `_on_playback_state`），用户重开窗口后点 ▶ 就能从这儿接着弹。
         """
         if not self._play_mode or self._play_kind != "keys":
             return
@@ -2893,6 +2907,22 @@ class MainWindow(QMainWindow):
         self._flash_status(f"{reason} — 已暂停，切回游戏后点 ▶ 继续")
         self._sync_play_buttons()
         self._sync_progress()
+
+    def _on_keys_blocked(self, blocked: bool) -> None:
+        """前台演奏"这一阵发不出键"（当前激活窗口是本程序）→ 只提示，**不暂停**。
+
+        M6d 用户语义：「当前激活是本程序时输入不生效」，但要一直播下去 ——
+        用户切到游戏窗口后，剩下的音自然就接上了。
+        """
+        if not self._play_mode or self._play_kind != "keys":
+            return
+        self._keys_blocked = bool(blocked)
+        if blocked:
+            self._flash_status(
+                "当前激活窗口是本程序 —— 按键暂时不生效（演奏继续，点一下游戏窗口即刻接上）"
+            )
+        else:
+            self._flash_status("已回到游戏窗口，按键恢复发送")
 
     def _spans_of_current_score(self) -> tuple[KeySpan, ...]:
         """当前试听谱面的逐键区间：**只认同一次录制产生的那个 `Score` 对象**。
@@ -2992,8 +3022,8 @@ class MainWindow(QMainWindow):
         total_notes = len(self._tick_spans)
         ordinal = self._playback.ordinal_at(self._play_progress.time_of(ratio))
         self._cursor = ordinal
-        # 本来在播就接着播（继续前要先把焦点还给游戏）；本来就是暂停 / 抢不到焦点都留暂停态
-        if self._scrub_was_playing and self._rearm_key_sink():
+        # 本来在播就接着播；后台窗口没了 / 本来就是暂停 → 留暂停态
+        if self._scrub_was_playing and self._can_inject_now():
             self._paused = False
             self._parked_ms = None
             if not self._playback.play_from(ordinal):  # 重建播放器，从新位置继续
@@ -3055,11 +3085,9 @@ class MainWindow(QMainWindow):
             self._flash_status(f"已暂停（{self._cursor + 1}/{total}）— 可快退/快进后继续")
             return
 
-        # 继续之前先把焦点还给游戏：暂停期间用户很可能点过本程序（拖动/快退），
-        # 前台注入这时如果直接开跑，字母键就打在界面上了。
-        if not self._rearm_key_sink():
-            # 发不出键**不退出演奏模式**（退出会让人以为"点一下播放就没了"）：
-            # 留在暂停态，用户自己切回目标窗口后再按播放即可。
+        # 后台通道要求目标窗口还活着；前台通道这里恒为 True（发不出键会逐拍跳过，不暂停）
+        if not self._can_inject_now():
+            # 不退出演奏模式（退出会让人以为"点一下播放就没了"）：留在暂停态
             self._paused = True
             self._sync_play_buttons()
             self._sync_progress()

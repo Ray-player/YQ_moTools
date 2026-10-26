@@ -175,4 +175,37 @@ def test_unready_sink_interrupts_with_reason() -> None:
     player.on_interrupt = reasons.append
     player.play()
     wait_idle(player)
-    assert reasons and "不在前台" in reasons[0]
+    assert reasons and "已停止" in reasons[0]
+
+
+def test_blocked_sink_keeps_playing_instead_of_interrupting() -> None:
+    """前台通道挡住时不中断：时间轴照走，只把这一拍跳过（M6d 用户要求）。
+
+    如果这里中断/暂停，点「演奏」的瞬间前台必然是本程序 → 前台模式永远起不来。
+    """
+
+    class BlockedSink(FakeSink):
+        interrupt_when_blocked = False
+
+        def ready(self) -> bool:
+            return False
+
+        def key_down(self, key: str) -> bool:
+            return False  # 与 ForegroundKeys 同款守卫：挡住时根本不发
+
+        def key_up(self, key: str) -> bool:
+            return True
+
+    sink = BlockedSink()
+    reasons: list[str] = []
+    blocked: list[bool] = []
+    player = KeyPlayer(score_from_tick_text("A200S"), sink)
+    player.on_interrupt = reasons.append
+    player.on_blocked = blocked.append
+    player.play()
+    wait_idle(player, limit=4.0)
+
+    assert not reasons, f"被挡时不该中断: {reasons}"
+    assert blocked == [True], "只提示一次状态翻转"
+    assert player.state is PlayerState.IDLE, "必须一路播到底"
+    assert sink.pressed() == [], "全程没有真发键"
