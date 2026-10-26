@@ -32,6 +32,9 @@ class RecordingSink:
     def release_all(self) -> None:
         self.events.append(("release", ""))
 
+    def describe(self) -> str:
+        return "测试通道"
+
     def ready(self) -> bool:
         return True
 
@@ -52,6 +55,9 @@ def window(monkeypatch: pytest.MonkeyPatch, tmp_path):
     win._playback_score = bgi_sheet.score_from_tick_text(text)
     win._refresh_playback_enabled()
 
+    # 起播倒计时默认关掉（延迟行为另有专门用例），否则每个用例都要等 3 秒
+    win._key_start_delay_ms = lambda: 0  # type: ignore[method-assign]
+
     calls: list[tuple] = []
     win._playback.play_from = lambda i=0: (calls.append(("play_from", i)), True)[1]
     win._playback.pause = lambda: calls.append(("pause",))
@@ -66,36 +72,33 @@ def test_entry_sits_left_of_preview(window) -> None:
     row = win._actions_row
     order = [row.itemAt(i).widget() for i in range(row.count()) if row.itemAt(i).widget()]
     assert order.index(win._btn_play_keys) < order.index(win._btn_play), "「演奏」在「试听」左侧"
-    assert order.index(win._btn_key_mode_entry) < order.index(
-        win._btn_play_keys
-    ), "通道胶囊在「演奏」左侧"
+    assert not hasattr(win, "_btn_key_mode_entry"), "M6e：入口处的通道胶囊已删除"
     win.close()
 
 
-def test_entry_mode_toggle_sets_saved_mode(window, monkeypatch: pytest.MonkeyPatch) -> None:
-    """入口胶囊决定"进去走哪条通道"，点一下就切并落盘。"""
+def test_mode_button_lives_in_play_bar(window, monkeypatch: pytest.MonkeyPatch) -> None:
+    """通道胶囊只在演奏控制条里：点一下就切并落盘（不做入口预选）。"""
     win, app = window
     saved: list[int] = []
     monkeypatch.setattr(win, "_save_app_config", lambda: saved.append(1))
+    monkeypatch.setattr(win, "_make_key_sink", lambda: RecordingSink())
 
     assert win._config.ui.key_play_mode == "background", "默认后台（M6c）"
-    assert win._btn_key_mode_entry.text() == "后台"
-    assert win._btn_key_mode_entry.isChecked() is False, "后台不是激活态"
+    assert win._btn_key_mode.text() == "后台"
+    assert win._btn_key_mode.isChecked() is False, "后台不是激活态"
+    assert win._btn_key_mode.isVisibleTo(win) is False, "没进演奏时不显示"
 
-    win._btn_key_mode_entry.click()
+    win._btn_play_keys.click()
+    app.processEvents()
+    assert win._btn_key_mode.isVisibleTo(win) is True
+
+    win._btn_key_mode.click()
     app.processEvents()
     assert win._config.ui.key_play_mode == "foreground"
-    assert win._btn_key_mode_entry.text() == "前台"
-    assert win._btn_key_mode_entry.isChecked() is True, "前台 = 按键激活效果（用户的第 1 条）"
-    assert win._btn_key_mode.text() == "前台", "播放条里那个胶囊跟着同步（同一个开关）"
-    assert win._btn_key_mode.isChecked() is True
+    assert win._btn_key_mode.text() == "前台"
+    assert win._btn_key_mode.isChecked() is True, "前台 = 按键激活效果"
     assert saved, "选择要落盘，下次启动沿用"
-
-    win._btn_key_mode_entry.click()
-    app.processEvents()
-    assert win._config.ui.key_play_mode == "background"
-    assert win._btn_key_mode_entry.text() == "后台"
-    assert win._btn_key_mode_entry.isChecked() is False
+    win._stop_playback()
     win.close()
 
 
@@ -216,19 +219,6 @@ def test_resume_does_not_need_rearm(window, monkeypatch: pytest.MonkeyPatch) -> 
     win.close()
 
 
-def test_entry_mode_button_hidden_while_playing(window, monkeypatch: pytest.MonkeyPatch) -> None:
-    win, app = window
-    monkeypatch.setattr(win, "_make_key_sink", RecordingSink)
-
-    win._btn_play_keys.click()
-    app.processEvents()
-    assert win._btn_key_mode_entry.isVisibleTo(win) is False, "演奏中由控制条里那个接管"
-    win._stop_playback()
-    app.processEvents()
-    assert win._btn_key_mode_entry.isVisibleTo(win) is True
-    win.close()
-
-
 def test_entry_mode_uses_background_sink(window, monkeypatch: pytest.MonkeyPatch) -> None:
     """选了后台，点「演奏」就造后台通道（不经过前台抢焦点那条路）。"""
     win, app = window
@@ -271,7 +261,8 @@ def test_click_swaps_entry_for_play_bar(window, monkeypatch: pytest.MonkeyPatch)
     assert win._btn_play.isVisibleTo(win) is False
     assert win._btn_play_keys.isVisibleTo(win) is False
     assert win._btn_key_mode.isVisibleTo(win) is True, "演奏时才有注入通道开关"
-    assert win.calls[-1] == ("play_from", 0)
+    played = [c for c in win.calls if c[0] in ("play_from", "resume")]
+    assert played, "进入演奏必须真的开始播（延迟为 0 时立刻开始）"
     win.close()
 
 
@@ -331,3 +322,58 @@ def test_controller_keys_mode_injects(spec_fwzs) -> None:
     assert ("up", "A") in sink.events
     assert sink.events[-1] == ("release", "")
     controller.close()
+
+
+def test_key_play_delay_counts_down_before_sending(window, monkeypatch) -> None:
+    """M6e：乐器级 `key_play_delay_ms` —— 起播先倒计时，期间一个键都不发。"""
+    win, app = window
+    monkeypatch.setattr(win, "_key_start_delay_ms", lambda: 1000)
+    monkeypatch.setattr(win, "_make_key_sink", lambda: RecordingSink())
+
+    win._btn_play_keys.click()
+    app.processEvents()
+    assert win._play_mode is True and win._paused is True, "倒计时期间停在起点"
+    assert not [c for c in win.calls if c[0] in ("play_from", "resume")], "倒计时期间不许起播"
+    assert "1 秒后开始演奏" in win._lbl_toast.text(), win._lbl_toast.text()
+
+    win._delay_deadline = 0.0  # 把截止时刻推到过去，模拟"时间到"
+    win._tick_key_delay()
+    assert win._paused is False, "到点必须起播"
+    assert [c for c in win.calls if c[0] in ("play_from", "resume")], "倒计时结束后要真的有起播动作"
+    win._stop_playback()
+    win.close()
+
+
+def test_pause_resume_also_counts_down(window, monkeypatch) -> None:
+    """暂停后点继续也要先倒计时（用户明确要求：暂停→播放同样延后输入）。"""
+    win, app = window
+    monkeypatch.setattr(win, "_make_key_sink", lambda: RecordingSink())
+    win._btn_play_keys.click()
+    app.processEvents()
+    win._toggle_pause()  # 暂停
+    assert win._paused is True
+
+    monkeypatch.setattr(win, "_key_start_delay_ms", lambda: 3000)
+    before = list(win.calls)
+    win._toggle_pause()  # 继续 → 先倒计时
+    assert win._paused is True, "倒计时期间仍然算暂停"
+    assert win.calls == before, "不许立刻起播"
+    assert "秒后开始演奏" in win._lbl_toast.text(), win._lbl_toast.text()
+    win._stop_playback()
+    win.close()
+
+
+def test_delay_cancelled_by_stop(window, monkeypatch) -> None:
+    """倒计时中按「停止」必须把计时器停掉，否则它会把播放又拉起来。"""
+    win, app = window
+    monkeypatch.setattr(win, "_key_start_delay_ms", lambda: 3000)
+    monkeypatch.setattr(win, "_make_key_sink", lambda: RecordingSink())
+    win._btn_play_keys.click()
+    app.processEvents()
+    assert win._delay_timer.isActive() is True
+
+    win._stop_playback()
+    app.processEvents()
+    assert win._delay_timer.isActive() is False
+    assert win._play_mode is False
+    win.close()

@@ -43,3 +43,6 @@ tests/*.jpg
 
 # HDR 探针输出（三路 A/B 的 PNG/差异图）
 tools/hdr_probe/hdr_ab/
+
+# 探针/手工跑 exe 时 `APPDATA=$(mktemp -d)` 落在仓库根部的残留
+tmp*/

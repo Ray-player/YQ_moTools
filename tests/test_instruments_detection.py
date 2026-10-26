@@ -238,3 +238,29 @@ def test_legacy_instrument_id_resolves_to_new_one() -> None:
     assert spec.name == "谐律键琴"
 
     assert "xlyq" not in load_instruments(), "旧 id 不能出现在下拉里"
+
+
+def test_key_play_delay_defaults_to_3000() -> None:
+    """M6e：演奏起播延迟是乐器级参数，缺省 3000ms。"""
+    from yqrec.types import DEFAULT_KEY_PLAY_DELAY_MS
+
+    assert DEFAULT_KEY_PLAY_DELAY_MS == 3000
+    for spec in load_instruments().values():
+        assert spec.key_play_delay_ms >= 0
+    assert load_instrument("fwzs").key_play_delay_ms == 3000
+
+
+def test_key_play_delay_from_json_and_clamped(tmp_path) -> None:
+    """JSON 里写了就按它；非法/越界不抛，钳到 0~60000。"""
+    data = json.loads(ASSETS.read_text(encoding="utf-8"))
+    data["instruments"] = data["instruments"][:1]
+    data["instruments"][0]["key_play_delay_ms"] = 800
+    path = tmp_path / "instruments.json"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert load_instruments(path)["fwzs"].key_play_delay_ms == 800
+
+    for raw, expected in ((0, 0), (999999, 60000), (-5, 0), ("abc", 3000)):
+        data["instruments"][0]["key_play_delay_ms"] = raw
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        got = load_instruments(path)["fwzs"].key_play_delay_ms
+        assert got == expected, (raw, got)

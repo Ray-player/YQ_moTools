@@ -331,6 +331,17 @@ LEGACY_SUSTAIN_MS = 200
 SUSTAIN_TEXT_MIN_MS = 50
 """谱面文本里延音后缀 `[ms]` 的写入下限：比它短的延音不写（与 01 §7.1 对齐）。"""
 
+DEFAULT_KEY_PLAY_DELAY_MS = 3000
+"""按键演奏的**起播延迟**（毫秒，乐器级参数 `assets/instruments.json` 的 `key_play_delay_ms`）。
+
+为什么需要它：点「演奏」时前台必然是本程序，后台模式也常需要先把游戏窗口摆好。
+留一段延迟，用户可以在倒计时期间把焦点交给游戏，延迟结束后才开始发键
+（倒计时在下方的消息区显示"x 秒后开始演奏"）。0 = 立即开始。
+"""
+
+MAX_KEY_PLAY_DELAY_MS = 60_000
+"""起播延迟的上限（60s）：再长基本是填错了，超出按上限截断。"""
+
 RECORD_CLICK_OFF = 0
 """`record_click` 模式 0：录制启动前不做任何输入注入。"""
 
@@ -458,6 +469,13 @@ class InstrumentSpec:
     等实机标定完成后把 JSON 里的 `preview_only` 去掉（或改 false），重启即恢复可选。
     """
 
+    key_play_delay_ms: int = DEFAULT_KEY_PLAY_DELAY_MS
+    """按键演奏的起播延迟（毫秒，`assets/instruments.json` 的乐器级 `key_play_delay_ms`）。
+
+    每次"点「演奏」开始"和"暂停后继续"都先倒计时这么久，再真的发键 ——
+    给用户时间把焦点交给游戏窗口。0 = 立即开始。
+    """
+
     def __post_init__(self) -> None:
         if self.key_count <= 0:
             raise ValueError("key_count 必须为正")
@@ -480,6 +498,10 @@ class InstrumentSpec:
         threshold = max(0, threshold)
         object.__setattr__(self, "sustain_ms", threshold)
         object.__setattr__(self, "sustain", threshold > 0)
+
+        # 起播延迟：负数无意义按 0，上限 60s（再长就是填错了）
+        delay = int(self.key_play_delay_ms)
+        object.__setattr__(self, "key_play_delay_ms", min(MAX_KEY_PLAY_DELAY_MS, max(0, delay)))
 
     # -- 便捷访问 ---------------------------------------------------------- #
 

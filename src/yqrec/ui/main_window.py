@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 import textwrap
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +142,10 @@ DEFAULT_INSTRUMENT_ID = "fwzs"
 
 PROGRESS_TICK_MS = 40
 """试听进度条刷新间隔（ms）：40 ≈ 25fps，够连续又不白烧主线程。"""
+
+KEY_DELAY_TICK_MS = 200
+"""演奏起播倒计时的刷新间隔（ms）：只用来更新"x 秒后开始演奏"，
+真正的截止时刻由单调时钟算，所以跳数不影响延迟精度。"""
 
 KEY_FLASH_MIN_MS = 60
 """试听回放时一次按下至少点亮多久（ms）：40ms 采样下短于这个值可能整帧跳过。"""
@@ -312,6 +317,15 @@ class MainWindow(QMainWindow):
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(PROGRESS_TICK_MS)
         self._progress_timer.timeout.connect(self._on_progress_tick)
+
+        # 演奏起播倒计时（M6e）：乐器级 key_play_delay_ms，给用户时间把焦点交给游戏。
+        # 200ms 一跳只为让"x 秒后开始演奏"及时刷新，真正的截止时刻由 `_delay_deadline` 算。
+        self._delay_timer = QTimer(self)
+        self._delay_timer.setInterval(KEY_DELAY_TICK_MS)
+        self._delay_timer.timeout.connect(self._tick_key_delay)
+        self._delay_deadline = 0.0
+        self._delay_play: Callable[[], None] | None = None
+        self._delay_seconds = 0
 
         # 编辑态控件
         self._edit_panel: EditPanel | None = None
@@ -603,12 +617,11 @@ class MainWindow(QMainWindow):
         self._refresh_save_tooltip()
 
     def _make_key_mode_button(self) -> QPushButton:
-        """前台/后台 注入通道胶囊（入口处预选 + 播放条内切换，两处各一个）。
+        """前台/后台 注入通道胶囊（**只放在演奏控制条里**，M6e 按用户要求去掉入口处那个）。
 
-        `checkable` + `#KeyMode:checked` = 用户要的"激活效果"（与 16:9 那个开关同一套观感）；
+        `checkable` + `#KeyMode:checked` = "激活效果"（与 16:9 那个开关同一套观感）；
         checked 语义固定为 **前台**：前台是 SendInput、需要窗口在最前，属于"更强的约束"，
-        用激活态把这件事显性化；后台是常态（默认值）。文字/勾选统一由
-        `_sync_key_mode_button()` 一次刷两处，避免两个视图各说各话。
+        用激活态把这件事显性化；后台是常态（默认值）。
         """
         button = QPushButton("前台")
         button.setObjectName("KeyMode")
@@ -706,12 +719,6 @@ class MainWindow(QMainWindow):
         )
         self._btn_play_keys.clicked.connect(self._toggle_key_play)
 
-        # 注入通道预选（入口处，M6b）：决定点「演奏」时**进去走哪条通道**。
-        # 播放条里那个胶囊是"边弹边换"（必须从当前位置重启）；这个只管"进去之前选"，
-        # 两者读写同一个 `ui.key_play_mode`，靠 `_sync_key_mode_button()` 保持一致。
-        self._btn_key_mode_entry = self._make_key_mode_button()
-        self._btn_key_mode_entry.clicked.connect(self._toggle_key_mode_entry)
-
         # 试听控制条（M2q.9）：进入试听模式后**原地替换**「试听」按钮
         self._play_bar = QWidget()
         self._play_bar.setObjectName("PlayBar")
@@ -737,7 +744,8 @@ class MainWindow(QMainWindow):
         self._btn_play_stop.setToolTip("停止试听并回到「试听」入口")
         self._btn_play_stop.clicked.connect(self._stop_playback)
         # 注入通道开关（只在按键演奏时出现）：前台 SendInput ⇄ 后台 PostMessage。
-        # 放控制条里而不是入口上：切通道必须从"当前位置"重启，只有演奏中才有这个上下文。
+        # M6e 起**只有这一处**（入口那个预选胶囊按用户要求删掉了）：通道偏好存在
+        # `ui.key_play_mode` 里，进了演奏再切即可（切换会从当前位置重启）。
         self._btn_key_mode = self._make_key_mode_button()
         self._btn_key_mode.clicked.connect(self._switch_key_mode)
         self._btn_key_mode.hide()
@@ -761,7 +769,6 @@ class MainWindow(QMainWindow):
             0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
         save_row.addSpacerItem(self._play_spacer)
-        save_row.addWidget(self._btn_key_mode_entry)
         save_row.addWidget(self._btn_play_keys)
         save_row.addWidget(self._btn_play)
         save_row.addWidget(self._play_bar, 1)
@@ -2634,17 +2641,20 @@ class MainWindow(QMainWindow):
         if not self._can_inject_now():  # 后台窗口没了：别搭台，直接报错
             self._key_sink = None
             return False
-        # 前台模式一律直接起播：当前激活的是本程序时按键会逐拍跳过（不暂停），
-        # 用户切到游戏窗口后就接上了 —— 这也是前台模式唯一能正常工作的方式。
-        self._enter_play_mode(0, kind="keys")
-        self._flash_status(f"演奏中（{sink.describe()}）")
+        # 先把台子搭好、停在起点，再走"起播延迟"（乐器级 key_play_delay_ms）：
+        # 倒计时期间用户可以点一下游戏窗口，倒计时结束才真的开始发键（M6e）。
+        self._enter_play_mode(0, kind="keys", autoplay=False)
+        if not self._schedule_key_start(self._resume_now):
+            self._resume_now()
         return True
 
-    def _enter_play_mode(self, start: int = 0, *, kind: str = "audio") -> None:
+    def _enter_play_mode(
+        self, start: int = 0, *, kind: str = "audio", autoplay: bool = True
+    ) -> None:
         """切到播放模式：入口按钮原位换成控制条，并从头（或指定和弦）开始播。
 
-        一律起播：M6d 起前台模式发不出键就**逐拍跳过**（演奏继续），所以不再需要
-        "只搭台不起播"那条路（旧 `autoplay=False` 已删）。
+        `autoplay=False` 只搭台、停在起点（等 `_schedule_key_start()` 倒计时结束后再起播）；
+        音频试听与"延迟为 0"的情况直接 `autoplay=True`。
         """
         self._play_mode = True
         self._play_kind = "keys" if kind == "keys" else "audio"
@@ -2657,13 +2667,20 @@ class MainWindow(QMainWindow):
         self._parked_ms = None
         self._btn_play.hide()
         self._btn_play_keys.hide()
-        self._btn_key_mode_entry.hide()  # 入口胶囊让位给控制条里那个（同一开关）
         self._play_bar.show()
         self._btn_key_mode.setVisible(self._play_kind == "keys")
         self._sync_key_mode_button()
         self._play_spacer.changeSize(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
         self._actions_row.invalidate()  # 让出留白给进度条
         self._highlight_at(self._cursor)
+        if not autoplay:  # 只搭台：停在起点，等 `_schedule_key_start()` 倒计时结束
+            self._paused = True
+            self._paused_at = self._cursor
+            self._parked_ms = self._playback.onset_of(self._cursor)
+            self._sync_play_buttons()
+            self._sync_progress()
+            self._refresh_action_emphasis()
+            return
         if not self._playback.play_from(self._cursor):
             self._set_error("播放失败：谱面为空")
             self._exit_play_mode()
@@ -2679,6 +2696,7 @@ class MainWindow(QMainWindow):
 
     def _exit_play_mode(self) -> None:
         """退出播放模式：控制条换回两个入口按钮，清高亮。"""
+        self._cancel_key_delay()  # 倒计时中退出：别让计时器把播放又拉起来
         had_spans = bool(self._play_spans)
         sink, self._key_sink = self._key_sink, None
         if sink is not None:  # 兜底：绝不让游戏里的琴键卡在按下状态
@@ -2701,7 +2719,6 @@ class MainWindow(QMainWindow):
         self._actions_row.invalidate()
         self._play_bar.hide()
         self._btn_key_mode.hide()
-        self._btn_key_mode_entry.show()
         self._btn_play_keys.show()
         self._btn_play.show()
         if had_spans:  # 回放点亮的键要熄掉，否则停在这里像"还按着"
@@ -2787,34 +2804,13 @@ class MainWindow(QMainWindow):
         return False
 
     def _sync_key_mode_button(self) -> None:
-        """刷新两处胶囊（入口预选 + 播放条内切换）的文字与说明。
+        """刷新演奏控制条里的「前台/后台」胶囊（M6e 起**只有这一处**）。
 
-        同一个 `ui.key_play_mode` 两个视图：入口那个回答"点演奏会怎么打"，
-        播放条那个回答"现在怎么打、点了会变成什么"。两处文字必须同时变，
-        否则用户会以为改了一个另一个没跟着走。
+        `ui.key_play_mode` 是唯一真相：文字 + 勾选（前台=激活态）+ 说明一次刷完。
         """
         mode = str(self._config.ui.key_play_mode or "background").lower()
         background = mode == inputsim.BackgroundKeys.mode
-        label = "后台" if background else "前台"
-        entry = self._btn_key_mode_entry
-        entry.setText(label)
-        entry.setChecked(not background)  # 前台 = 激活态（accent-soft）
-        entry.setToolTip(
-            (
-                "点「演奏」时：后台 PostMessage\n"
-                "· 不用切窗口：按键直接投给游戏窗口，本程序可以一直在前面\n"
-                "· 只对读窗口消息的程序有效，走 RawInput 的游戏可能没反应\n"
-                "点一下改成「前台 SendInput」"
-            )
-            if background
-            else (
-                "点「演奏」时：前台 SendInput\n"
-                "· 发给**当前激活的那个窗口**；激活的是本程序就不发键（演奏照走，不会打错地方）\n"
-                "· 不用先框选区域，演奏中游戏窗口留在最前面即可\n"
-                "点一下改成「后台 PostMessage」"
-            )
-        )
-        self._btn_key_mode.setText(label)
+        self._btn_key_mode.setText("后台" if background else "前台")
         self._btn_key_mode.setChecked(not background)
         self._btn_key_mode.setToolTip(
             (
@@ -2827,28 +2823,9 @@ class MainWindow(QMainWindow):
             else (
                 "当前：前台 SendInput（发给当前激活窗口）\n"
                 "· 激活的是本程序时**不发键、也不暂停**，切到游戏后接着弹\n"
-                "· 不抢焦点：自己点一下游戏窗口就行\n"
+                "· 不抢焦点：点一下游戏窗口就行\n"
                 "点一下切到「后台 PostMessage」（从当前位置继续）"
             )
-        )
-
-    def _toggle_key_mode_entry(self) -> None:
-        """入口胶囊：换下一次「演奏」的注入通道（不涉及在播状态，只改偏好）。"""
-        if self._play_mode:  # 演奏中由控制条里那个负责：换通道必须从当前位置重启
-            self._sync_key_mode_button()  # 按钮自身的 checked 已被点翻，拉回来
-            return
-        background = (
-            str(self._config.ui.key_play_mode or "background").lower()
-            == inputsim.BackgroundKeys.mode
-        )
-        self._config.ui.key_play_mode = "foreground" if background else "background"
-        self._save_app_config()
-        self._sync_key_mode_button()
-        self._refresh_playback_enabled()  # 演奏按钮的 tooltip 里也写着当前通道
-        self._flash_status(
-            "按「演奏」将使用后台 PostMessage（不用切窗口，直接投给游戏）"
-            if not background
-            else "按「演奏」将使用前台 SendInput（发给当前激活窗口；本程序在前台时不发）"
         )
 
     def _switch_key_mode(self) -> None:
@@ -2865,6 +2842,7 @@ class MainWindow(QMainWindow):
         was_playing = not self._paused
         self._config.ui.key_play_mode = "foreground" if background else "background"
         self._save_app_config()
+        self._cancel_key_delay()  # 换通道就不再等之前那次倒计时
         self._playback.stop(emit_state=False)  # 换通道前先停（顺带松开所有键）
         sink = self._make_key_sink()
         if sink is None:  # 新通道用不了（例如后台要窗口但游戏已关）→ 回退并停播
@@ -3069,6 +3047,51 @@ class MainWindow(QMainWindow):
             else "停止试听并回到「试听」入口"
         )
 
+    def _key_start_delay_ms(self) -> int:
+        """当前乐器的演奏起播延迟（毫秒）。音频试听恒 0（试听不需要倒计时）。"""
+        if self._play_kind != "keys":
+            return 0
+        return max(0, int(getattr(self._spec, "key_play_delay_ms", 0) or 0))
+
+    def _schedule_key_start(self, play: Callable[[], None]) -> bool:
+        """起播/继续前先倒计时；返回 `True` 表示"正在倒计时，先别起播"。
+
+        延迟来自乐器参数 `key_play_delay_ms`（默认 3000ms）。倒计时期间：
+        播放头不动、一个键都不发，消息区显示"x 秒后开始演奏" —— 用户可以趁这几秒
+        把焦点交给游戏窗口，倒计时结束后 `play()` 才真的开始。
+        """
+        delay = self._key_start_delay_ms()
+        if delay <= 0:
+            return False
+        self._delay_play = play
+        self._delay_deadline = time.monotonic() + delay / 1000.0
+        self._delay_seconds = max(1, int(round(delay / 1000.0)))
+        self._flash_status(f"{self._delay_seconds} 秒后开始演奏…（现在把焦点切到游戏窗口）")
+        self._delay_timer.start()
+        return True
+
+    def _tick_key_delay(self) -> None:
+        """倒计时一跳：刷新"x 秒后"，到点就真的起播。"""
+        left = self._delay_deadline - time.monotonic()
+        if left > 0:
+            seconds = max(1, int(left + 0.999))  # 向上取整：2.3s 显示"3 秒"
+            if seconds != self._delay_seconds:
+                self._delay_seconds = seconds
+                self._flash_status(f"{seconds} 秒后开始演奏…")
+            return
+        self._delay_timer.stop()
+        play, self._delay_play = self._delay_play, None
+        if play is not None:
+            play()
+
+    def _cancel_key_delay(self) -> bool:
+        """取消倒计时。返回是否**真的**取消了（用来区分"点停止"和"立即开始"）。"""
+        running = self._delay_timer.isActive()
+        self._delay_timer.stop()
+        self._delay_play = None
+        self._delay_seconds = 0
+        return running
+
     def _toggle_pause(self) -> None:
         """播放 ⇄ 暂停。继续时：位置没动就无缝 resume，动过就 seek 到新位置。"""
         if not self._play_mode:
@@ -3092,6 +3115,24 @@ class MainWindow(QMainWindow):
             self._sync_play_buttons()
             self._sync_progress()
             return
+        # 倒计时还没走完又点了一下 ▶ = "现在就开始"，直接起播
+        if self._cancel_key_delay():
+            self._resume_now()
+            return
+        # 暂停 → 继续也要先倒计时（用户要求：留时间把焦点交给游戏）
+        if self._schedule_key_start(self._resume_now):
+            self._sync_play_buttons()
+            self._sync_progress()
+            return
+        self._resume_now()
+
+    def _resume_now(self) -> None:
+        """真的从暂停处继续（位置没动就无缝 resume，动过就 seek 到新位置）。
+
+        倒计时结束后由 `_tick_key_delay` 调，也用于"延迟为 0"和"点 ▶ 立即开始"。
+        """
+        if not self._play_mode or not self._paused:
+            return
         if self._cursor != self._paused_at:
             self._playback.play_from(self._cursor)  # 位置被移动过 → 从新位置重开
         elif not self._playback.resume():
@@ -3102,6 +3143,10 @@ class MainWindow(QMainWindow):
         self._highlight_at(self._cursor)
         self._sync_play_buttons()
         self._sync_progress()
+        self._progress_timer.start()
+        sink = self._key_sink
+        if self._play_kind == "keys" and sink is not None:
+            self._flash_status(f"开始演奏（{sink.describe()}）")
 
     def _step_cursor(self, delta: int) -> None:
         """暂停状态下移动高亮（只动高亮，不发声）。"""

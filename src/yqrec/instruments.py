@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .logging import get_logger
 from .types import (
+    DEFAULT_KEY_PLAY_DELAY_MS,
     DEFAULT_RECORD_CLICK_MODE,
     LEGACY_SUSTAIN_MS,
     RECORD_CLICK_MOUSE,
@@ -326,6 +327,25 @@ def _parse_sustain_ms(raw: dict, inst_id: str) -> int:
     return threshold
 
 
+def _parse_key_play_delay_ms(raw: dict, inst_id: str) -> int:
+    """乐器级 `key_play_delay_ms`（int 毫秒，0 = 立即开始，缺省 3000）。
+
+    容错：非整数/负数一律回落默认值并记 warning。越界由 `InstrumentSpec.__post_init__` 截断。
+    """
+    value = raw.get("key_play_delay_ms")
+    if value is None:
+        return DEFAULT_KEY_PLAY_DELAY_MS
+    try:
+        delay = int(value)
+    except (TypeError, ValueError):
+        _log.warning("%s: key_play_delay_ms=%r 不是整数，按默认 %dms", inst_id, value, DEFAULT_KEY_PLAY_DELAY_MS)
+        return DEFAULT_KEY_PLAY_DELAY_MS
+    if delay < 0:
+        _log.warning("%s: key_play_delay_ms=%s 为负，按 0 处理", inst_id, delay)
+        return 0
+    return delay
+
+
 def load_instruments(path: Path | str | None = None) -> dict[str, InstrumentSpec]:
     """加载乐器表，返回 `{id: InstrumentSpec}`（**插入顺序 = JSON 顺序 = 下拉顺序**）。"""
     p = Path(path) if path else instruments_path()
@@ -369,6 +389,7 @@ def load_instruments(path: Path | str | None = None) -> dict[str, InstrumentSpec
                 ),
                 sustain_ms=_parse_sustain_ms(raw, inst_id),
                 preview_only=bool(raw.get("preview_only", False)),
+                key_play_delay_ms=_parse_key_play_delay_ms(raw, inst_id),
             )
         except (KeyError, TypeError, ValueError) as exc:
             _log.warning("%s: 解析失败（%s），已跳过该乐器", inst_id, exc)
