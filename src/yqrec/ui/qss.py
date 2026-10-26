@@ -449,6 +449,8 @@ QPushButton#MediaStop:hover {
     color: {{danger}};
 }
 /* 按键演奏的注入通道开关（M5）：小胶囊，只表达"现在走哪条通道" */
+/* 前台/后台胶囊（入口「演奏」左侧 + 播放条里各一个）：与 #Toggle 同一套观感 ——
+   未选中 = 透明描边，选中 = accent-soft 激活态。checked 表示"前台"。 */
 QPushButton#KeyMode {
     background: transparent;
     border: 1px solid {{border-default}};
@@ -461,6 +463,16 @@ QPushButton#KeyMode:hover {
     background: {{bg-surface-hover}};
     border-color: {{border-strong}};
     color: {{text-primary}};
+}
+QPushButton#KeyMode:checked {
+    background: {{accent-soft}};
+    border-color: {{accent-border}};
+    color: {{accent-text}};
+}
+QPushButton#KeyMode:checked:hover {
+    background: {{accent-soft}};
+    border-color: {{accent-border}};
+    color: {{accent-text}};
 }
 
 /* =====================================================================

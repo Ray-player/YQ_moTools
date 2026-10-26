@@ -1,0 +1,36 @@
+{
+  "version": 5,
+  "backend": "hdr",
+  "profile": "",
+  "target": null,
+  "record": {
+    "hotkey": "F9",
+    "chord_window_ms": 25.0,
+    "min_hold_ms": 0.0,
+    "min_gap_ms": 30.0,
+    "debug_ringbuffer": false
+  },
+  "audio": {
+    "enabled": true,
+    "volume": 0.8,
+    "offset_ms": 0
+  },
+  "ui": {
+    "language": "zh-CN",
+    "theme": "light",
+    "hud": true,
+    "always_on_top": true,
+    "window_width": 558,
+    "window_height": 913,
+    "window_maximized": false,
+    "window_x": 1393,
+    "window_y": 50,
+    "sample_mode": "ring",
+    "square_offset_y": 0,
+    "instrument": "",
+    "key_play_mode": "background"
+  },
+  "paths": {
+    "last_score_dir": ""
+  }
+}

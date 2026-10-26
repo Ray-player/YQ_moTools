@@ -206,7 +206,7 @@ class KeyPlayer:
             self.on_state(state)
 
     def _interrupt(self, reason: str) -> None:
-        """目标窗口不能再注入：停表并通知 UI（UI 会退出演奏模式）。"""
+        """目标窗口不能再注入：停表并通知 UI（UI 会把演奏停在暂停态，不退出）。"""
         _log.warning("演奏中断: %s", reason)
         self._stop.set()
         if self.on_interrupt:
@@ -258,7 +258,7 @@ class KeyPlayer:
                             self._restore_held(self._last_at_ms)
                         time.sleep(min(0.005, max(0.0, target - time.perf_counter())))
                     if not self._sink.ready():
-                        self._interrupt("目标窗口不在前台（或已关闭）—— 演奏已停止")
+                        self._interrupt("目标窗口不在前台（或已关闭）")
                         return
                     if action.down:
                         self._sink.key_down(action.key)

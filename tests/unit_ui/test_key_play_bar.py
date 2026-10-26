@@ -78,20 +78,101 @@ def test_entry_mode_toggle_sets_saved_mode(window, monkeypatch: pytest.MonkeyPat
     saved: list[int] = []
     monkeypatch.setattr(win, "_save_app_config", lambda: saved.append(1))
 
-    assert win._config.ui.key_play_mode == "foreground", "默认前台"
-    assert win._btn_key_mode_entry.text() == "前台"
-
-    win._btn_key_mode_entry.click()
-    app.processEvents()
-    assert win._config.ui.key_play_mode == "background"
+    assert win._config.ui.key_play_mode == "background", "默认后台（M6c）"
     assert win._btn_key_mode_entry.text() == "后台"
-    assert win._btn_key_mode.text() == "后台", "播放条里那个胶囊跟着同步（同一个开关）"
-    assert saved, "选择要落盘，下次启动沿用"
+    assert win._btn_key_mode_entry.isChecked() is False, "后台不是激活态"
 
     win._btn_key_mode_entry.click()
     app.processEvents()
     assert win._config.ui.key_play_mode == "foreground"
     assert win._btn_key_mode_entry.text() == "前台"
+    assert win._btn_key_mode_entry.isChecked() is True, "前台 = 按键激活效果（用户的第 1 条）"
+    assert win._btn_key_mode.text() == "前台", "播放条里那个胶囊跟着同步（同一个开关）"
+    assert win._btn_key_mode.isChecked() is True
+    assert saved, "选择要落盘，下次启动沿用"
+
+    win._btn_key_mode_entry.click()
+    app.processEvents()
+    assert win._config.ui.key_play_mode == "background"
+    assert win._btn_key_mode_entry.text() == "后台"
+    assert win._btn_key_mode_entry.isChecked() is False
+    win.close()
+
+
+def test_target_falls_back_to_window_below(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """没框选区域、前台又是本程序时，用 z-order 下面那个窗口（不再强制先框选）。"""
+    from yqrec import inputsim
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    from PySide6.QtWidgets import QApplication
+
+    from yqrec.ui.main_window import MainWindow
+
+    QApplication.instance() or QApplication([])
+    win = MainWindow()
+    win._region = None  # 没框选
+    # offscreen 平台的 winId 不是真实句柄（is_own_window 认不出来）→ 直接指定"谁是自己"
+    monkeypatch.setattr(inputsim, "is_own_window", lambda h: int(h) == int(win.winId()))
+    monkeypatch.setattr(inputsim, "window_at", lambda *a: 0)
+    monkeypatch.setattr(inputsim, "key_target_window", lambda: 0xBEEF)
+    # 模拟"用户刚点了本程序的按钮"：前台=本程序，且没有采样到外部窗口
+    monkeypatch.setattr(inputsim, "foreground_window", lambda: int(win.winId()))
+    win._last_external_hwnd = 0
+    assert win._key_target_hwnd() == 0xBEEF, "前台是本程序时不该直接判 0 报错"
+
+    # 有"最近用过的外部窗口"（还活着就当它）：优先于 z-order，避免投给下面那个别的程序
+    monkeypatch.setattr(inputsim, "is_window", lambda h: h == 0x7777)
+    win._last_external_hwnd = 0x7777
+    assert win._key_target_hwnd() == 0x7777
+
+    # 前台是外部程序 → 用它（用户此刻正在用的那个）；采样器也会把它记下来
+    monkeypatch.setattr(inputsim, "foreground_window", lambda: 0x9999)
+    monkeypatch.setattr(inputsim, "is_app_window", lambda h: True)
+    win._sample_external_foreground()
+    assert win._last_external_hwnd == 0x9999
+    assert win._key_target_hwnd() == 0x9999
+    win.close()
+
+
+def test_foreground_mode_never_steals_focus(window, monkeypatch: pytest.MonkeyPatch) -> None:
+    """前台模式：当前激活是本程序 → 不抢焦点、只判"不能发"，UI 停在暂停态。"""
+    from yqrec import inputsim
+
+    win, app = window
+    win._config.ui.key_play_mode = "foreground"
+    sink = inputsim.ForegroundKeys(0x1234)
+    win._key_sink = sink
+    calls: list[int] = []
+    monkeypatch.setattr(inputsim, "activate_window", lambda hwnd: calls.append(hwnd) or True)
+    monkeypatch.setattr(inputsim, "foreground_window", lambda: int(win.winId()))
+    assert win._rearm_key_sink() is False, "当前激活是本程序 → 本帧不发键"
+    assert calls == [], "用户明确要求不要替人抢焦点"
+
+    monkeypatch.setattr(inputsim, "foreground_window", lambda: 0x1234)
+    assert win._rearm_key_sink() is True, "游戏在前台 → 可以发"
+    win._key_sink = None
+    win.close()
+
+
+def test_start_playback_pauses_when_focus_not_target(
+    window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """前台模式起播时抢不到目标 → 搭好台停在暂停态，且一个音都不发。"""
+    from yqrec import inputsim
+
+    win, app = window
+    win._config.ui.key_play_mode = "foreground"
+    monkeypatch.setattr(win, "_make_key_sink", lambda: inputsim.ForegroundKeys(0x1234))
+    monkeypatch.setattr(inputsim, "foreground_window", lambda: int(win.winId()))
+
+    win._btn_play_keys.click()
+    app.processEvents()
+    assert win._play_mode is True, "仍然进入演奏模式（不是报错退出）"
+    assert win._paused is True, "停在暂停态"
+    played = [c for c in win.calls if c[0] in ("play_from", "resume")]
+    assert played == [], f"不该起播（会先打出几个音）: {played}"
+    win._stop_playback()
     win.close()
 
 

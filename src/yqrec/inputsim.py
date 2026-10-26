@@ -463,6 +463,61 @@ def is_own_window(hwnd: int) -> bool:
     return bool(pid.value) and pid.value == kernel32.GetCurrentProcessId()
 
 
+GW_HWNDNEXT = 2
+GW_OWNER = 4
+GWL_EXSTYLE = -20
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_NOACTIVATE = 0x08000000
+user32.GetWindow.argtypes = [wt.HWND, wt.UINT]
+user32.GetWindow.restype = wt.HWND
+user32.IsWindowVisible.argtypes = [wt.HWND]
+user32.IsIconic.argtypes = [wt.HWND]
+user32.GetWindowTextLengthW.restype = ctypes.c_int
+
+
+def is_app_window(hwnd: int) -> bool:
+    """像不像"用户正在用的那个程序窗口"（排掉本程序、工具窗、托盘隐藏窗、最小化的）。"""
+    if not hwnd or is_own_window(hwnd):
+        return False
+    if not user32.IsWindowVisible(hwnd):
+        return False
+    if user32.IsIconic(hwnd):  # 最小化的窗口收不到按键，别当目标
+        return False
+    if user32.GetWindow(hwnd, GW_OWNER):  # 有 owner 的是对话框/工具窗
+        return False
+    style = int(_get_window_long(hwnd, GWL_EXSTYLE) or 0)
+    if style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE):
+        return False
+    return user32.GetWindowTextLengthW(hwnd) > 0
+
+
+def is_window(hwnd: int) -> bool:
+    """句柄是否还是个活着的窗口（记忆目标前复核用，防句柄被复用）。"""
+    return bool(hwnd) and bool(user32.IsWindow(hwnd))
+
+
+def key_target_window() -> int:
+    """按键演奏要打给谁：**当前前台窗口**，否则 z-order 里它下面第一个正常窗口。
+
+    为什么需要"下面那个"：用户点「演奏」/「播放」时前台是**本程序**（按钮在我们这儿），
+    按"前台窗口"取会取到自己。而 z-order 里紧挨在下面的通常就是他刚切走的那个程序
+    （游戏），比"必须先用框选区域反选回来"宽松得多 —— 用户明确要求别强制先框选。
+
+    返回值可能是 0（桌面上没有任何候选窗口），调用方据此给提示。
+    """
+    foreground = int(foreground_window() or 0)
+    if is_app_window(foreground):
+        return foreground
+    hwnd = user32.GetWindow(foreground, GW_HWNDNEXT) if foreground else 0
+    seen = 0
+    while hwnd and seen < 64:  # 防御性上限：z-order 极端情况下别死循环
+        if is_app_window(int(hwnd)):
+            return int(hwnd)
+        hwnd = user32.GetWindow(hwnd, GW_HWNDNEXT)
+        seen += 1
+    return 0
+
+
 def activate_window(hwnd: int) -> bool:
     """把 ``hwnd`` 激活为前台键盘焦点；**返回前用 GetForegroundWindow 复核**。
 
