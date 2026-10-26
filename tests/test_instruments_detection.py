@@ -21,6 +21,7 @@ from yqrec.instruments import (
     instrument_deltas,
     load_instrument,
     load_instruments,
+    load_key_play_delay_ms,
     load_sampling,
     parse_detection,
     parse_sampling,
@@ -240,27 +241,37 @@ def test_legacy_instrument_id_resolves_to_new_one() -> None:
     assert "xlyq" not in load_instruments(), "旧 id 不能出现在下拉里"
 
 
-def test_key_play_delay_defaults_to_3000() -> None:
-    """M6e：演奏起播延迟是乐器级参数，缺省 3000ms。"""
+def test_key_play_delay_is_global_and_defaults_to_3000() -> None:
+    """M6f：起播延迟是**全局**参数（所有乐器共用），缺省 3000ms。"""
     from yqrec.types import DEFAULT_KEY_PLAY_DELAY_MS
 
     assert DEFAULT_KEY_PLAY_DELAY_MS == 3000
+    assert load_key_play_delay_ms() == 3000
     for spec in load_instruments().values():
-        assert spec.key_play_delay_ms >= 0
-    assert load_instrument("fwzs").key_play_delay_ms == 3000
+        assert not hasattr(spec, "key_play_delay_ms"), "不该再有乐器级延迟"
 
 
 def test_key_play_delay_from_json_and_clamped(tmp_path) -> None:
-    """JSON 里写了就按它；非法/越界不抛，钳到 0~60000。"""
+    """JSON 顶层写了就按它；非法/越界不抛，钳到 0~60000。缺项回落 3000。"""
     data = json.loads(ASSETS.read_text(encoding="utf-8"))
-    data["instruments"] = data["instruments"][:1]
-    data["instruments"][0]["key_play_delay_ms"] = 800
+    path = tmp_path / "instruments.json"
+
+    for raw, expected in ((800, 800), (0, 0), (999999, 60000), (-5, 0), ("abc", 3000)):
+        data["key_play_delay_ms"] = raw
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        got = load_key_play_delay_ms(path)
+        assert got == expected, (raw, got)
+
+    data.pop("key_play_delay_ms")
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert load_key_play_delay_ms(path) == 3000, "没写就用默认值"
+
+
+def test_key_play_delay_is_shared_by_all_instruments(tmp_path) -> None:
+    """同一个全局值对每个乐器都成立（用户明确要求"所有乐器共用同一延迟"）。"""
+    data = json.loads(ASSETS.read_text(encoding="utf-8"))
+    data["key_play_delay_ms"] = 1500
     path = tmp_path / "instruments.json"
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    assert load_instruments(path)["fwzs"].key_play_delay_ms == 800
-
-    for raw, expected in ((0, 0), (999999, 60000), (-5, 0), ("abc", 3000)):
-        data["instruments"][0]["key_play_delay_ms"] = raw
-        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        got = load_instruments(path)["fwzs"].key_play_delay_ms
-        assert got == expected, (raw, got)
+    assert load_key_play_delay_ms(path) == 1500
+    assert len(load_instruments(path)) >= 6, "全局参数不该影响乐器解析"

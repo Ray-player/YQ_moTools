@@ -55,8 +55,12 @@ def window(monkeypatch: pytest.MonkeyPatch, tmp_path):
     win._playback_score = bgi_sheet.score_from_tick_text(text)
     win._refresh_playback_enabled()
 
-    # 起播倒计时默认关掉（延迟行为另有专门用例），否则每个用例都要等 3 秒
-    win._key_start_delay_ms = lambda: 0  # type: ignore[method-assign]
+    # 起播倒计时默认关掉（延迟行为另有专门用例），否则每个用例都要等 3 秒。
+    # 打桩打**全局读取函数**而不是 `_key_start_delay_ms()` 本身：
+    # 这样"延迟从哪来"这条链路仍然被测到（M6f 改成全局参数后尤其重要）。
+    from yqrec.ui import main_window as mw_mod
+
+    monkeypatch.setattr(mw_mod, "load_key_play_delay_ms", lambda: 0)
 
     calls: list[tuple] = []
     win._playback.play_from = lambda i=0: (calls.append(("play_from", i)), True)[1]
@@ -325,7 +329,7 @@ def test_controller_keys_mode_injects(spec_fwzs) -> None:
 
 
 def test_key_play_delay_counts_down_before_sending(window, monkeypatch) -> None:
-    """M6e：乐器级 `key_play_delay_ms` —— 起播先倒计时，期间一个键都不发。"""
+    """M6e：起播延迟 —— 倒计时期间一个键都不发。"""
     win, app = window
     monkeypatch.setattr(win, "_key_start_delay_ms", lambda: 1000)
     monkeypatch.setattr(win, "_make_key_sink", lambda: RecordingSink())
@@ -376,4 +380,27 @@ def test_delay_cancelled_by_stop(window, monkeypatch) -> None:
     app.processEvents()
     assert win._delay_timer.isActive() is False
     assert win._play_mode is False
+    win.close()
+
+
+def test_start_delay_reads_global_param(window, monkeypatch) -> None:
+    """M6f：延迟是**全局**参数 —— 换乐器/不换都读同一个值，且不看乐器 spec。"""
+    from yqrec.ui import main_window as mw
+
+    win, _app = window
+    win._play_kind = "keys"
+    monkeypatch.setattr(mw, "load_key_play_delay_ms", lambda: 2500)
+    assert win._key_start_delay_ms() == 2500
+    assert not hasattr(win._spec, "key_play_delay_ms"), "乐器级字段已删除"
+
+    win._play_kind = "audio"
+    assert win._key_start_delay_ms() == 0, "试听不需要倒计时"
+
+    win._play_kind = "keys"
+
+    def boom() -> int:
+        raise OSError("json 读不到")
+
+    monkeypatch.setattr(mw, "load_key_play_delay_ms", boom)
+    assert win._key_start_delay_ms() == 0, "配置读不到时不许拦下演奏"
     win.close()

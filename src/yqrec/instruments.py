@@ -20,6 +20,7 @@ from .types import (
     KeyArea,
     KeyThreshold,
     SamplingSpec,
+    clamp_key_play_delay_ms,
 )
 
 _log = get_logger("instruments")
@@ -327,22 +328,28 @@ def _parse_sustain_ms(raw: dict, inst_id: str) -> int:
     return threshold
 
 
-def _parse_key_play_delay_ms(raw: dict, inst_id: str) -> int:
-    """乐器级 `key_play_delay_ms`（int 毫秒，0 = 立即开始，缺省 3000）。
+def load_key_play_delay_ms(path: Path | str | None = None) -> int:
+    """加载**全局**起播延迟 `key_play_delay_ms`（毫秒，所有乐器共用同一值）。
 
-    容错：非整数/负数一律回落默认值并记 warning。越界由 `InstrumentSpec.__post_init__` 截断。
+    点「演奏」开始、以及「暂停 → 继续」都先倒计时这么久再真的发键，
+    给用户时间把焦点交给游戏窗口（v1.50 起从乐器级改为全局：它描述的是
+    "人切窗口要多久"，与弹的是哪把琴无关）。
+
+    取值：``0`` = 立即开始；缺省 / 非法 → `DEFAULT_KEY_PLAY_DELAY_MS`(3000)；
+    超出 ``0~60000`` 由 `clamp_key_play_delay_ms()` 截断。绝不抛。
     """
-    value = raw.get("key_play_delay_ms")
-    if value is None:
-        return DEFAULT_KEY_PLAY_DELAY_MS
+    p = Path(path) if path else instruments_path()
     try:
-        delay = int(value)
-    except (TypeError, ValueError):
-        _log.warning("%s: key_play_delay_ms=%r 不是整数，按默认 %dms", inst_id, value, DEFAULT_KEY_PLAY_DELAY_MS)
+        data = _read_json(p)
+    except (OSError, ValueError) as exc:
+        _log.warning("读取 key_play_delay_ms 失败（%s），按默认 %dms", exc, DEFAULT_KEY_PLAY_DELAY_MS)
         return DEFAULT_KEY_PLAY_DELAY_MS
-    if delay < 0:
-        _log.warning("%s: key_play_delay_ms=%s 为负，按 0 处理", inst_id, delay)
-        return 0
+    raw = data.get("key_play_delay_ms")
+    if raw is None:
+        return DEFAULT_KEY_PLAY_DELAY_MS
+    delay = clamp_key_play_delay_ms(raw)
+    if delay != raw:  # 只提示真正被规整过的值，正常配置不刷日志
+        _log.warning("key_play_delay_ms=%r 非法/越界，按 %dms 处理", raw, delay)
     return delay
 
 
@@ -389,7 +396,6 @@ def load_instruments(path: Path | str | None = None) -> dict[str, InstrumentSpec
                 ),
                 sustain_ms=_parse_sustain_ms(raw, inst_id),
                 preview_only=bool(raw.get("preview_only", False)),
-                key_play_delay_ms=_parse_key_play_delay_ms(raw, inst_id),
             )
         except (KeyError, TypeError, ValueError) as exc:
             _log.warning("%s: 解析失败（%s），已跳过该乐器", inst_id, exc)

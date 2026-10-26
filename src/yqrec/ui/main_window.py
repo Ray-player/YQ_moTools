@@ -73,6 +73,7 @@ from ..instruments import (
     assets_dir,
     instruments_mtime,
     load_instruments,
+    load_key_play_delay_ms,
     load_record_click,
     load_sampling,
     resolve_instrument_id,
@@ -318,7 +319,7 @@ class MainWindow(QMainWindow):
         self._progress_timer.setInterval(PROGRESS_TICK_MS)
         self._progress_timer.timeout.connect(self._on_progress_tick)
 
-        # 演奏起播倒计时（M6e）：乐器级 key_play_delay_ms，给用户时间把焦点交给游戏。
+        # 演奏起播倒计时（M6e）：全局 key_play_delay_ms，给用户时间把焦点交给游戏。
         # 200ms 一跳只为让"x 秒后开始演奏"及时刷新，真正的截止时刻由 `_delay_deadline` 算。
         self._delay_timer = QTimer(self)
         self._delay_timer.setInterval(KEY_DELAY_TICK_MS)
@@ -2641,7 +2642,7 @@ class MainWindow(QMainWindow):
         if not self._can_inject_now():  # 后台窗口没了：别搭台，直接报错
             self._key_sink = None
             return False
-        # 先把台子搭好、停在起点，再走"起播延迟"（乐器级 key_play_delay_ms）：
+        # 先把台子搭好、停在起点，再走"起播延迟"（全局 key_play_delay_ms）：
         # 倒计时期间用户可以点一下游戏窗口，倒计时结束才真的开始发键（M6e）。
         self._enter_play_mode(0, kind="keys", autoplay=False)
         if not self._schedule_key_start(self._resume_now):
@@ -3048,17 +3049,25 @@ class MainWindow(QMainWindow):
         )
 
     def _key_start_delay_ms(self) -> int:
-        """当前乐器的演奏起播延迟（毫秒）。音频试听恒 0（试听不需要倒计时）。"""
+        """演奏起播延迟（毫秒，**全局**参数 `assets/instruments.json` 的 `key_play_delay_ms`）。
+
+        音频试听恒 0（试听不需要倒计时）。每次现读而不是启动时缓存：这个参数
+        是手改 JSON 调的，改完按 F5 就该生效，不该等下次启动。
+        """
         if self._play_kind != "keys":
             return 0
-        return max(0, int(getattr(self._spec, "key_play_delay_ms", 0) or 0))
+        try:
+            return max(0, int(load_key_play_delay_ms()))
+        except Exception as exc:  # 配置读不到不该把演奏拦下来
+            _log.warning("读取 key_play_delay_ms 失败（%s），按 0 处理", exc)
+            return 0
 
     def _schedule_key_start(self, play: Callable[[], None]) -> bool:
         """起播/继续前先倒计时；返回 `True` 表示"正在倒计时，先别起播"。
 
-        延迟来自乐器参数 `key_play_delay_ms`（默认 3000ms）。倒计时期间：
-        播放头不动、一个键都不发，消息区显示"x 秒后开始演奏" —— 用户可以趁这几秒
-        把焦点交给游戏窗口，倒计时结束后 `play()` 才真的开始。
+        延迟来自**全局**参数 `key_play_delay_ms`（默认 3000ms，所有乐器共用）。
+        倒计时期间：播放头不动、一个键都不发，消息区显示"x 秒后开始演奏" ——
+        用户可以趁这几秒把焦点交给游戏窗口，倒计时结束后 `play()` 才真的开始。
         """
         delay = self._key_start_delay_ms()
         if delay <= 0:
