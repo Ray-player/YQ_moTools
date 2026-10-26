@@ -312,6 +312,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._restore_ui_options()
+        self._sync_key_mode_button()  # 入口胶囊按落盘的 ui.key_play_mode 显示初值
         self._restore_window_size()
         self._apply_theme(self._theme)
         self._apply_on_top_state(self._config.ui.always_on_top)
@@ -572,6 +573,19 @@ class MainWindow(QMainWindow):
         self._reset_status_text()
         self._refresh_save_tooltip()
 
+    def _make_key_mode_button(self) -> QPushButton:
+        """前台/后台 注入通道胶囊（入口处预选 + 播放条内切换，两处各一个）。
+
+        样式与尺寸必须一致：用户看到的应是"同一个开关的两个位置"，
+        所以文字/说明统一由 `_sync_key_mode_button()` 一次刷两处。
+        """
+        button = QPushButton("前台")
+        button.setObjectName("KeyMode")
+        button.setFixedSize(42, 22)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        return button
+
     def _tool_button(self, text: str, role: str, *, width: int) -> QPushButton:
         """工具栏按钮：统一高度 + 档位 objectName（`Secondary`/`Quiet`/`Primary`/`Danger`）。"""
         button = QPushButton(text)
@@ -660,6 +674,12 @@ class MainWindow(QMainWindow):
         )
         self._btn_play_keys.clicked.connect(self._toggle_key_play)
 
+        # 注入通道预选（入口处，M6b）：决定点「演奏」时**进去走哪条通道**。
+        # 播放条里那个胶囊是"边弹边换"（必须从当前位置重启）；这个只管"进去之前选"，
+        # 两者读写同一个 `ui.key_play_mode`，靠 `_sync_key_mode_button()` 保持一致。
+        self._btn_key_mode_entry = self._make_key_mode_button()
+        self._btn_key_mode_entry.clicked.connect(self._toggle_key_mode_entry)
+
         # 试听控制条（M2q.9）：进入试听模式后**原地替换**「试听」按钮
         self._play_bar = QWidget()
         self._play_bar.setObjectName("PlayBar")
@@ -686,11 +706,7 @@ class MainWindow(QMainWindow):
         self._btn_play_stop.clicked.connect(self._stop_playback)
         # 注入通道开关（只在按键演奏时出现）：前台 SendInput ⇄ 后台 PostMessage。
         # 放控制条里而不是入口上：切通道必须从"当前位置"重启，只有演奏中才有这个上下文。
-        self._btn_key_mode = QPushButton("前台")
-        self._btn_key_mode.setObjectName("KeyMode")
-        self._btn_key_mode.setFixedSize(42, 22)
-        self._btn_key_mode.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_key_mode.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_key_mode = self._make_key_mode_button()
         self._btn_key_mode.clicked.connect(self._switch_key_mode)
         self._btn_key_mode.hide()
         for widget in (self._btn_rewind, self._btn_toggle_play, self._btn_forward):
@@ -713,6 +729,7 @@ class MainWindow(QMainWindow):
             0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
         save_row.addSpacerItem(self._play_spacer)
+        save_row.addWidget(self._btn_key_mode_entry)
         save_row.addWidget(self._btn_play_keys)
         save_row.addWidget(self._btn_play)
         save_row.addWidget(self._play_bar, 1)
@@ -2584,6 +2601,7 @@ class MainWindow(QMainWindow):
         self._parked_ms = None
         self._btn_play.hide()
         self._btn_play_keys.hide()
+        self._btn_key_mode_entry.hide()  # 入口胶囊让位给控制条里那个（同一开关）
         self._play_bar.show()
         self._btn_key_mode.setVisible(self._play_kind == "keys")
         self._sync_key_mode_button()
@@ -2626,6 +2644,7 @@ class MainWindow(QMainWindow):
         self._actions_row.invalidate()
         self._play_bar.hide()
         self._btn_key_mode.hide()
+        self._btn_key_mode_entry.show()
         self._btn_play_keys.show()
         self._btn_play.show()
         if had_spans:  # 回放点亮的键要熄掉，否则停在这里像"还按着"
@@ -2692,10 +2711,33 @@ class MainWindow(QMainWindow):
         return False
 
     def _sync_key_mode_button(self) -> None:
-        """刷新控制条上的通道开关（文字 + 说明）。"""
+        """刷新两处胶囊（入口预选 + 播放条内切换）的文字与说明。
+
+        同一个 `ui.key_play_mode` 两个视图：入口那个回答"点演奏会怎么打"，
+        播放条那个回答"现在怎么打、点了会变成什么"。两处文字必须同时变，
+        否则用户会以为改了一个另一个没跟着走。
+        """
         mode = str(self._config.ui.key_play_mode or "foreground").lower()
         background = mode == inputsim.BackgroundKeys.mode
-        self._btn_key_mode.setText("后台" if background else "前台")
+        label = "后台" if background else "前台"
+        entry = self._btn_key_mode_entry
+        entry.setText(label)
+        entry.setToolTip(
+            (
+                "点「演奏」时：后台 PostMessage\n"
+                "· 不抢焦点，可以一边弹一边操作本程序 / 别的窗口\n"
+                "· 只对读窗口消息的程序有效，走 RawInput 的游戏可能没反应\n"
+                "点一下改成「前台 SendInput」"
+            )
+            if background
+            else (
+                "点「演奏」时：前台 SendInput\n"
+                "· 最可靠，绝大多数游戏只认这条通道\n"
+                "· 开始演奏会把游戏窗口切到最前；焦点离开游戏就自动停\n"
+                "点一下改成「后台 PostMessage」"
+            )
+        )
+        self._btn_key_mode.setText(label)
         self._btn_key_mode.setToolTip(
             (
                 "当前：后台 PostMessage（不抢焦点，投递给目标窗口）\n"
@@ -2710,6 +2752,23 @@ class MainWindow(QMainWindow):
                 "· 焦点离开游戏时演奏会自动停止（防止按键打进别的窗口）\n"
                 "点一下切到「后台 PostMessage」"
             )
+        )
+
+    def _toggle_key_mode_entry(self) -> None:
+        """入口胶囊：换下一次「演奏」的注入通道（不涉及在播状态，只改偏好）。"""
+        if self._play_mode:  # 演奏中由控制条里那个负责：换通道必须从当前位置重启
+            return
+        background = (
+            str(self._config.ui.key_play_mode or "").lower() == inputsim.BackgroundKeys.mode
+        )
+        self._config.ui.key_play_mode = "foreground" if background else "background"
+        self._save_app_config()
+        self._sync_key_mode_button()
+        self._refresh_playback_enabled()  # 演奏按钮的 tooltip 里也写着当前通道
+        self._flash_status(
+            "按「演奏」将使用后台 PostMessage（不抢焦点，可切走窗口）"
+            if not background
+            else "按「演奏」将使用前台 SendInput（需保持游戏窗口在最前）"
         )
 
     def _switch_key_mode(self) -> None:

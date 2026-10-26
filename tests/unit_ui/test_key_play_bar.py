@@ -66,6 +66,67 @@ def test_entry_sits_left_of_preview(window) -> None:
     row = win._actions_row
     order = [row.itemAt(i).widget() for i in range(row.count()) if row.itemAt(i).widget()]
     assert order.index(win._btn_play_keys) < order.index(win._btn_play), "「演奏」在「试听」左侧"
+    assert order.index(win._btn_key_mode_entry) < order.index(
+        win._btn_play_keys
+    ), "通道胶囊在「演奏」左侧"
+    win.close()
+
+
+def test_entry_mode_toggle_sets_saved_mode(window, monkeypatch: pytest.MonkeyPatch) -> None:
+    """入口胶囊决定"进去走哪条通道"，点一下就切并落盘。"""
+    win, app = window
+    saved: list[int] = []
+    monkeypatch.setattr(win, "_save_app_config", lambda: saved.append(1))
+
+    assert win._config.ui.key_play_mode == "foreground", "默认前台"
+    assert win._btn_key_mode_entry.text() == "前台"
+
+    win._btn_key_mode_entry.click()
+    app.processEvents()
+    assert win._config.ui.key_play_mode == "background"
+    assert win._btn_key_mode_entry.text() == "后台"
+    assert win._btn_key_mode.text() == "后台", "播放条里那个胶囊跟着同步（同一个开关）"
+    assert saved, "选择要落盘，下次启动沿用"
+
+    win._btn_key_mode_entry.click()
+    app.processEvents()
+    assert win._config.ui.key_play_mode == "foreground"
+    assert win._btn_key_mode_entry.text() == "前台"
+    win.close()
+
+
+def test_entry_mode_button_hidden_while_playing(window, monkeypatch: pytest.MonkeyPatch) -> None:
+    win, app = window
+    monkeypatch.setattr(win, "_make_key_sink", RecordingSink)
+    monkeypatch.setattr(win, "_rearm_key_sink", lambda: True)
+
+    win._btn_play_keys.click()
+    app.processEvents()
+    assert win._btn_key_mode_entry.isVisibleTo(win) is False, "演奏中由控制条里那个接管"
+    win._stop_playback()
+    app.processEvents()
+    assert win._btn_key_mode_entry.isVisibleTo(win) is True
+    win.close()
+
+
+def test_entry_mode_uses_background_sink(window, monkeypatch: pytest.MonkeyPatch) -> None:
+    """选了后台，点「演奏」就造后台通道（不经过前台抢焦点那条路）。"""
+    win, app = window
+    win._config.ui.key_play_mode = "background"
+    win._sync_key_mode_button()
+    made: list[str] = []
+
+    def fake_sink():
+        made.append(win._config.ui.key_play_mode)
+        return RecordingSink()
+
+    monkeypatch.setattr(win, "_make_key_sink", fake_sink)
+    monkeypatch.setattr(win, "_rearm_key_sink", lambda: True)
+    win._btn_play_keys.click()
+    app.processEvents()
+    assert made == ["background"]
+    assert win._play_kind == "keys"
+    win._stop_playback()
     win.close()
 
 
