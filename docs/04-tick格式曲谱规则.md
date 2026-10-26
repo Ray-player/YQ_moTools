@@ -137,27 +137,28 @@ keyUp:   —     1300      —      1796
 
 ---
 
-## 6. 谱面 JSON（`version: 4`）
+## 6. 谱面 JSON（`version: 5`）
 
 tick 文本是**唯一谱面数据**，其它字段都是元信息（没有冗余的 `events[]`）：
 
 ```json
 {
-  "version": 4,
+  "version": 5,
+  "type": "tick",
+  "Average_Delta": 40,
+  "Min_Delta": 24,
   "format": "yqrec.recording",
   "score_format": "tick",
   "name": "谱面",
   "created_at": "2026-10-23T10:38:00+08:00",
   "instrument": { "id": "xljq", "name": "谐律键琴", "key_count": 21 },
   "capture": { "backend": "hdr", "fps": 60.0, "frames": 300, "duration_ms": 4983.3 },
-  "tick": {
-    "unit": "ms",
-    "text": "A[800]1000DF",
-    "sustain": true
-  }
+  "tick": { "unit": "ms", "text": "A[800]1000DF", "sustain": true }
 }
 ```
 
+- `type`（v5）：曲谱类型，当前恒 `"tick"`；与 BetterGI 曲谱的 `type` 同位置同语义。
+- `Average_Delta` / `Min_Delta`（v5）：识别质量统计（整数灰阶，0 = 无识别数据）；`v1.44` 之前的笔误键 `Avage_Delta` 只读兼容。
 - `tick.unit`：**`"ms"` = 数字即毫秒**（v3 起）；`"frame"` 是 v2 旧文件的帧数，读取时乘 `capture.duration_ms/(frames-1)` 换算（见 `scorefile.ms_per_frame`）。
 - `tick.sustain`：这份谱面**是否含延音**的标记（仅提示，不影响解析；老 exe 打开会忽略它并丢延音）。
 - `capture.fps/frames` 自 v3 起**只作记录**，不参与任何换算。
