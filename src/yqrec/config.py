@@ -104,6 +104,13 @@ class UiConfig:
     （2026-10-23 用户实机反馈："乐器一直固定在老旧的诗琴"）。空值保留"跟随标定档"的
     旧行为，老档升级后不会丢标定。
     """
+    key_play_mode: str = "foreground"
+    """按键演奏的注入通道（M5）：`foreground`（SendInput，打进前台窗口）/
+    `background`（PostMessage，投给目标窗口、不抢前台）。
+
+    默认前台：游戏窗口在前台时最可靠。后台模式是给"游戏只读窗口消息"的场景兜底 ——
+    走 RawInput/DirectInput 的游戏后台收不到，所以两种都留着让用户实机试。
+    """
 
 
 @dataclass(slots=True)

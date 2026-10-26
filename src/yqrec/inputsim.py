@@ -1,17 +1,20 @@
-"""前台键鼠注入（借鉴 BetterGI 的 SendInput 通道，见 01 §15 技术总结）。
+"""键鼠注入（前台 SendInput / 后台 PostMessage，借鉴 BetterGI 的双通道，见 01 §15）。
 
-只实现本项目当前需要的能力：
+能力：
 
 - **模拟一次鼠标左键点击**（`record_click` 模式 2）；
 - **把窗口激活为前台后模拟一次空格键**（`record_click` 模式 1），
   激活流程抄 MAA ``ForegroundUtils.h`` 的三段式（提层 → SetForegroundWindow
-  → 复核，失败再 TOPMOST↔NOTOPMOST 强提）。
+  → 复核，失败再 TOPMOST↔NOTOPMOST 强提）；
+- **琴键演奏的字母键按下/抬起**（`ForegroundKeys` / `BackgroundKeys`，M5）：
+  前台走 SendInput + 扫描码，后台走 ``PostMessage(WM_KEYDOWN/UP)`` 到目标窗口，
+  两条通道的语义与 BetterGI 的 ``SendInputChannel`` / ``PostMessageChannel`` 对齐。
 
 后续要扩展时保持三条约定：
 
 - 坐标一律用**全局物理像素**（与框选区域/截图后端同口径）；
   进程已声明 Per-Monitor DPI aware，SetCursorPos/SendInput 按物理像素解析。
-- 扩展键位要带 extended 位（空格/左键均非扩展键，暂无此问题）。
+- 扩展键位要带 extended 位（空格/左键/字母键均非扩展键，暂无此问题）。
 - 注入失败只记 warning 返回 False，绝不抛异常打断业务流。
 """
 
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+import threading
 import time
 from pathlib import Path
 
@@ -483,3 +487,222 @@ def activate_window(hwnd: int) -> bool:
     if not ok:
         _log.warning("activate_window(0x%x) 复核失败（前台锁定未放行）", hwnd)
     return ok
+
+
+# --------------------------------------------------------------------------- #
+# 按键演奏（M5）：字母键 → 前台 SendInput / 后台 PostMessage
+# --------------------------------------------------------------------------- #
+
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_ACTIVATE = 0x0006
+
+user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+user32.PostMessageW.restype = wt.BOOL
+user32.IsWindow.argtypes = [wt.HWND]
+user32.IsWindow.restype = wt.BOOL
+
+
+def _letter(key: str) -> str:
+    """琴键归一化成单个大写字母（`'a'` / `'A'` → `'A'`）。"""
+    text = str(key).strip()
+    if len(text) != 1 or not text.isascii() or not text.isalpha():
+        raise ValueError(f"不支持的琴键: {key!r}（琴键必须是 A-Z 单个字母）")
+    return text.upper()
+
+
+def virtual_key(key: str) -> int:
+    """`'A'` → `0x41`：字母键的虚拟键码恰好等于其大写 ASCII 码。"""
+    return ord(_letter(key))
+
+
+def same_root_window(a: int, b: int) -> bool:
+    """两个句柄是否属于同一个**顶层**窗口。
+
+    前台注入前要拿 `GetForegroundWindow()` 与目标比对，但游戏常把键盘焦点交给
+    某个子窗口/宿主控件，直接比句柄会误判成"焦点丢了"。统一归一到根窗口再比。
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return int(user32.GetAncestor(int(a), GA_ROOT) or a) == int(
+        user32.GetAncestor(int(b), GA_ROOT) or b
+    )
+
+
+def _key_lparam(vk: int, key_up: bool) -> int:
+    """后台 `WM_KEYDOWN/UP` 的 lParam：重复次数 1 + 扫描码，抬起再置"前一状态/转换"位。
+
+    与 BetterGI `PostMessageSimulator.MakeKeyLParam` 完全同构（字母键都不是扩展键，
+    所以不需要第 24 位）。扫描码必须带：很多游戏只读扫描码判断按的是哪个键。
+    """
+    scan = int(user32.MapVirtualKeyW(int(vk), 0)) & 0xFF
+    value = 1 | (scan << 16)
+    if key_up:
+        value |= (1 << 30) | (1 << 31)
+    return value
+
+
+class ForegroundKeys:
+    """前台通道：SendInput + 扫描码，按键打进**当前前台窗口**。
+
+    `target_hwnd` 非 0 时，每次注入前都复核前台是否还是它（`ready()`）——
+    前台注入最坏的情况不是"没反应"，而是**打进别的窗口**：用户一个 Alt+Tab，
+    接下来那串字母就全进了浏览器/聊天框；要命的是打回本程序的谱面文本框时，
+    谱面会被当场改坏。所以"焦点不在目标窗口"一律视为不可注入。
+    """
+
+    mode = "foreground"
+
+    def __init__(self, target_hwnd: int = 0) -> None:
+        self.target_hwnd = int(target_hwnd or 0)
+        self._pressed: set[str] = set()
+        self._lock = threading.Lock()
+
+    def describe(self) -> str:
+        return f"前台 SendInput → {describe(self.target_hwnd)}"
+
+    def ready(self) -> bool:
+        """当前是否还该注入（焦点是否仍在目标窗口）。"""
+        if not self.target_hwnd:
+            return True
+        return same_root_window(foreground_window(), self.target_hwnd)
+
+    def key_down(self, key: str) -> bool:
+        letter = _letter(key)
+        with self._lock:
+            if letter in self._pressed:  # 同键重复 down 会被游戏当成系统自动重复，丢掉
+                return True
+            if not self.ready():
+                return False
+            if not _send_key(virtual_key(letter), KEYEVENTF_SCANCODE):
+                return False
+            self._pressed.add(letter)
+            return True
+
+    def key_up(self, key: str) -> bool:
+        letter = _letter(key)
+        with self._lock:
+            if letter not in self._pressed:
+                return True
+            # 抬起**无条件**发：up 不会输入字符，打到别的窗口也没危害；
+            # 反过来漏发会把游戏里的键一直按住（换乐器/退出演奏时尤其明显）。
+            ok = _send_key(virtual_key(letter), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
+            self._pressed.discard(letter)
+            return ok
+
+    def release_all(self) -> None:
+        with self._lock:
+            for letter in list(self._pressed):
+                _send_key(virtual_key(letter), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
+            self._pressed.clear()
+
+    def force_release(self, keys) -> None:
+        """对给定键**无条件**补发一次抬起（收尾保险）。
+
+        游戏里漏一个抬起 = 那个琴键按死在按下状态，用户只能切窗口/重开乐器才能恢复。
+        所以演奏收尾宁可多发一次无用的 up —— 多余的抬起对游戏没有任何副作用。
+        """
+        with self._lock:
+            for key in keys:
+                try:
+                    letter = _letter(key)
+                except ValueError:
+                    continue
+                _send_key(virtual_key(letter), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
+            self._pressed.clear()
+
+    def keys_down(self) -> tuple[str, ...]:
+        """当前按住的键（诊断/测试用）。"""
+        with self._lock:
+            return tuple(sorted(self._pressed))
+
+
+class BackgroundKeys:
+    """后台通道：``PostMessage(WM_KEYDOWN/UP)`` 投递到目标窗口，不抢前台。
+
+    与 BetterGI `PostMessageChannel` 一致：目标不在前台时，每次按 key 前先补一条
+    ``WM_ACTIVATE``（否则很多游戏会把后台投递的消息直接丢掉）。
+    代价是：只对"读窗口消息"的游戏生效，走 RawInput/DirectInput 的游戏后台收不到 ——
+    所以两个通道都留着，让用户实机试。
+    """
+
+    mode = "background"
+
+    def __init__(self, hwnd: int) -> None:
+        self.hwnd = int(hwnd or 0)
+        self._pressed: set[str] = set()
+        self._lock = threading.Lock()
+
+    def describe(self) -> str:
+        return f"后台 PostMessage → {describe(self.hwnd)}"
+
+    def activate(self) -> bool:
+        if not self.hwnd:
+            return False
+        return bool(user32.PostMessageW(self.hwnd, WM_ACTIVATE, 1, 0))
+
+    def ready(self) -> bool:
+        return bool(self.hwnd) and bool(user32.IsWindow(self.hwnd))
+
+    def _post(self, letter: str, key_up: bool) -> bool:
+        if not self.ready():
+            return False
+        vk = virtual_key(letter)
+        message = WM_KEYUP if key_up else WM_KEYDOWN
+        if not user32.PostMessageW(self.hwnd, message, vk, _key_lparam(vk, key_up)):
+            _log.warning("PostMessage(0x%x, %s) 失败: winerror=%s", self.hwnd, letter, ctypes.get_last_error())
+            return False
+        return True
+
+    def key_down(self, key: str) -> bool:
+        letter = _letter(key)
+        with self._lock:
+            if letter in self._pressed:
+                return True
+            if not self.ready():
+                return False
+            if not same_root_window(foreground_window(), self.hwnd):
+                self.activate()  # 后台收键前先"通知已激活"（BGI 同款）
+            if not self._post(letter, False):
+                return False
+            self._pressed.add(letter)
+            return True
+
+    def key_up(self, key: str) -> bool:
+        letter = _letter(key)
+        with self._lock:
+            if letter not in self._pressed:
+                return True
+            ok = self._post(letter, True)
+            self._pressed.discard(letter)
+            return ok
+
+    def release_all(self) -> None:
+        with self._lock:
+            for letter in list(self._pressed):
+                self._post(letter, True)
+            self._pressed.clear()
+
+    def force_release(self, keys) -> None:
+        """对给定键**无条件**补发一次抬起（收尾保险，见 `ForegroundKeys.force_release`）。"""
+        with self._lock:
+            for key in keys:
+                try:
+                    letter = _letter(key)
+                except ValueError:
+                    continue
+                self._post(letter, True)
+            self._pressed.clear()
+
+    def keys_down(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(sorted(self._pressed))
+
+
+def make_key_sink(mode: str, hwnd: int = 0) -> ForegroundKeys | BackgroundKeys:
+    """按 `mode`（`"foreground"` / `"background"`）造一个按键通道；未知值当前台。"""
+    if str(mode).lower() == BackgroundKeys.mode:
+        return BackgroundKeys(hwnd)
+    return ForegroundKeys(hwnd)

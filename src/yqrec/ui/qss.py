@@ -448,6 +448,20 @@ QPushButton#MediaStop {
 QPushButton#MediaStop:hover {
     color: {{danger}};
 }
+/* 按键演奏的注入通道开关（M5）：小胶囊，只表达"现在走哪条通道" */
+QPushButton#KeyMode {
+    background: transparent;
+    border: 1px solid {{border-default}};
+    border-radius: 9px;
+    color: {{text-secondary}};
+    font-size: 11px;
+    padding: 0;
+}
+QPushButton#KeyMode:hover {
+    background: {{bg-surface-hover}};
+    border-color: {{border-strong}};
+    color: {{text-primary}};
+}
 
 /* =====================================================================
    7. 浮层：手动点选面板（背景/边框/箭头由 EditPanel.paintEvent 自绘）

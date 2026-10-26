@@ -259,6 +259,14 @@ class MainWindow(QMainWindow):
         self._tick_spans: list[tuple[int, int]] = []
         self._play_mode = False
         """试听模式：控制条可见（含暂停状态）。"""
+        self._play_kind = "audio"
+        """当前播放栏在放什么：`audio`（软件内试听）/ `keys`（按键演奏，M5）。
+
+        两种模式共用同一条控制条与同一套进度/暂停逻辑 —— 差别只在
+        `PlaybackController` 的输出通道，所以这里只记"叫什么、文案怎么写"。
+        """
+        self._key_sink: inputsim.ForegroundKeys | inputsim.BackgroundKeys | None = None
+        """按键演奏的注入通道（前台 SendInput / 后台 PostMessage）；音频模式恒为 None。"""
         self._paused = False
         """试听中处于暂停（只有暂停时快进/快退可用）。"""
         self._cursor = 0
@@ -309,6 +317,7 @@ class MainWindow(QMainWindow):
         self._apply_on_top_state(self._config.ui.always_on_top)
         self._playback.note_played.connect(self._highlight_note)
         self._playback.state_changed.connect(self._on_playback_state)
+        self._playback.interrupted.connect(self._on_key_interrupted)
         self._load_startup_instrument()
         _log.info("捕获后端可用性: %s", backend_availability())
         self._load_profile()
@@ -641,6 +650,16 @@ class MainWindow(QMainWindow):
         self._btn_play.setToolTip("预览停止且文本框里有谱面时可试听")
         self._btn_play.clicked.connect(self._toggle_playback)
 
+        # 按键演奏（M5）：入口在「试听」**左侧**，点了以后同样换成控制条，
+        # 只是不播放软件内的采样，而是把谱面当按键打进游戏窗口（游戏自己发声）。
+        self._btn_play_keys = self._tool_button("演奏", "Secondary", width=64)
+        self._btn_play_keys.setEnabled(False)
+        self._btn_play_keys.setToolTip(
+            "把谱面模拟成键盘按键打到游戏窗口（游戏自己发声）\n"
+            "前台 = SendInput，游戏窗口必须在最前；后台 = PostMessage，不抢焦点"
+        )
+        self._btn_play_keys.clicked.connect(self._toggle_key_play)
+
         # 试听控制条（M2q.9）：进入试听模式后**原地替换**「试听」按钮
         self._play_bar = QWidget()
         self._play_bar.setObjectName("PlayBar")
@@ -665,8 +684,18 @@ class MainWindow(QMainWindow):
         self._btn_play_stop.setObjectName("MediaStop")
         self._btn_play_stop.setToolTip("停止试听并回到「试听」入口")
         self._btn_play_stop.clicked.connect(self._stop_playback)
+        # 注入通道开关（只在按键演奏时出现）：前台 SendInput ⇄ 后台 PostMessage。
+        # 放控制条里而不是入口上：切通道必须从"当前位置"重启，只有演奏中才有这个上下文。
+        self._btn_key_mode = QPushButton("前台")
+        self._btn_key_mode.setObjectName("KeyMode")
+        self._btn_key_mode.setFixedSize(42, 22)
+        self._btn_key_mode.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_key_mode.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_key_mode.clicked.connect(self._switch_key_mode)
+        self._btn_key_mode.hide()
         for widget in (self._btn_rewind, self._btn_toggle_play, self._btn_forward):
             play_bar.addWidget(widget)
+        play_bar.addWidget(self._btn_key_mode)
         play_bar.addWidget(VLine(self))
         play_bar.addWidget(self._btn_play_stop)
         self._btn_rewind.clicked.connect(lambda: self._step_cursor(-1))
@@ -684,6 +713,7 @@ class MainWindow(QMainWindow):
             0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
         save_row.addSpacerItem(self._play_spacer)
+        save_row.addWidget(self._btn_play_keys)
         save_row.addWidget(self._btn_play)
         save_row.addWidget(self._play_bar, 1)
         return save_row
@@ -2393,7 +2423,7 @@ class MainWindow(QMainWindow):
         self._refresh_playback_enabled()
 
     def _refresh_playback_enabled(self) -> None:
-        """试听按钮：预览未激活 + 文本框有内容 + 有可播谱面 才启用。"""
+        """两个入口按钮：预览未激活 + 文本框有内容 + 有可播谱面 才启用。"""
         has_text = bool(self._record_view.toPlainText().strip())
         ready = (
             not self._recording
@@ -2401,16 +2431,28 @@ class MainWindow(QMainWindow):
             and self._playback_score is not None
             and has_text
         )
-        if self._play_mode:  # 试听模式中入口按钮已隐藏，状态由控制条自己管
+        if self._play_mode:  # 播放中入口按钮已隐藏，状态由控制条自己管
             return
         self._btn_play.setEnabled(ready)
+        self._btn_play_keys.setEnabled(ready)
         self._btn_load_score.setEnabled(not self._recording)
         if ready:
             self._btn_play.setToolTip("从头试听谱面（预览需处于停止状态）")
+            mode = str(self._config.ui.key_play_mode or "foreground").lower()
+            self._btn_play_keys.setToolTip(
+                "把谱面模拟成键盘按键打到游戏窗口（游戏自己发声）\n"
+                + (
+                    "当前：后台 PostMessage（不抢焦点）"
+                    if mode == inputsim.BackgroundKeys.mode
+                    else "当前：前台 SendInput（游戏窗口必须保持最前）"
+                )
+            )
         elif self._worker is not None:
             self._btn_play.setToolTip("先点「停止预览」关闭预览，才能试听")
+            self._btn_play_keys.setToolTip("先点「停止预览」关闭预览，才能按键演奏")
         else:
             self._btn_play.setToolTip("需要先录制或读取一份谱面")
+            self._btn_play_keys.setToolTip("需要先录制或读取一份谱面")
 
     def _load_score_file(self) -> None:
         """从磁盘读取谱面（自动识别 YQ_moTools JSON / BetterGI 曲谱），可直接试听。"""
@@ -2491,21 +2533,49 @@ class MainWindow(QMainWindow):
         return button
 
     def _toggle_playback(self) -> None:
-        """入口按钮：进入试听模式（立即开始播放）。"""
+        """「试听」入口：进入播放条，用软件内的采样发声。"""
         if self._play_mode:
             self._stop_playback()
             return
+        self._start_playback("audio")
+
+    def _toggle_key_play(self) -> None:
+        """「演奏」入口（M5）：进入播放条，把谱面当按键打进游戏窗口。"""
+        if self._play_mode:
+            self._stop_playback()
+            return
+        self._start_playback("keys")
+
+    def _start_playback(self, kind: str) -> bool:
+        """按 `kind` 起播：`audio` 走采样引擎，`keys` 走键盘注入。"""
         score = self._playback_score
         if score is None or not score.events:
-            self._flash_status("没有可试听的谱面")
-            return
-        self._playback.load(score, self._spec)
-        self._flash_status("正在加载采样并开始试听…")
-        self._enter_play_mode(0)
+            self._flash_status("没有可试听 / 演奏的谱面")
+            return False
+        if kind != "keys":
+            self._playback.load(score, self._spec, mode="audio")
+            self._flash_status("正在加载采样并开始试听…")
+            self._enter_play_mode(0, kind="audio")
+            return True
 
-    def _enter_play_mode(self, start: int = 0) -> None:
-        """切到试听模式：入口按钮原位换成控制条，并从头（或指定和弦）开始播。"""
+        sink = self._make_key_sink()
+        if sink is None:
+            return False
+        self._key_sink = sink
+        # 前台通道必须**先**把游戏抢回焦点：注入发生在播放线程启动后的几毫秒内，
+        # 晚一步开头几个音就打在本程序自己的界面上了（打到文本框还会改坏谱面）。
+        if not self._rearm_key_sink():
+            self._key_sink = None
+            return False
+        self._playback.load(score, self._spec, mode="keys", sink=sink)
+        self._enter_play_mode(0, kind="keys")
+        self._flash_status(f"演奏中（{sink.describe()}）")
+        return True
+
+    def _enter_play_mode(self, start: int = 0, *, kind: str = "audio") -> None:
+        """切到播放模式：入口按钮原位换成控制条，并从头（或指定和弦）开始播。"""
         self._play_mode = True
+        self._play_kind = "keys" if kind == "keys" else "audio"
         self._paused = False
         self._scrubbing = False
         self._paused_at = self._cursor = max(0, int(start))
@@ -2513,27 +2583,37 @@ class MainWindow(QMainWindow):
         self._shown_pressed = {}
         self._parked_ms = None
         self._btn_play.hide()
+        self._btn_play_keys.hide()
         self._play_bar.show()
+        self._btn_key_mode.setVisible(self._play_kind == "keys")
+        self._sync_key_mode_button()
         self._play_spacer.changeSize(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
         self._actions_row.invalidate()  # 让出留白给进度条
         self._highlight_at(self._cursor)
         if not self._playback.play_from(self._cursor):
-            self._set_error("试听失败：谱面为空")
+            self._set_error("播放失败：谱面为空")
             self._exit_play_mode()
             return
         self._sync_play_buttons()
         self._sync_progress()
         self._progress_timer.start()
         self._refresh_action_emphasis()
-        if self._play_spans:
+        if self._play_kind == "audio" and self._play_spans:
             self._flash_status(
                 f"试听中 · 同步回放录制键位（{len(self._play_spans)} 次按下，含按下 Δ）"
             )
 
     def _exit_play_mode(self) -> None:
-        """退出试听模式：控制条换回入口按钮，清高亮。"""
+        """退出播放模式：控制条换回两个入口按钮，清高亮。"""
         had_spans = bool(self._play_spans)
+        sink, self._key_sink = self._key_sink, None
+        if sink is not None:  # 兜底：绝不让游戏里的琴键卡在按下状态
+            try:
+                sink.release_all()
+            except Exception as exc:
+                _log.debug("释放按键失败（已忽略）: %s", exc)
         self._play_mode = False
+        self._play_kind = "audio"
         self._paused = False
         self._scrubbing = False
         self._paused_at = self._cursor = 0
@@ -2545,12 +2625,135 @@ class MainWindow(QMainWindow):
         self._play_spacer.changeSize(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._actions_row.invalidate()
         self._play_bar.hide()
+        self._btn_key_mode.hide()
+        self._btn_play_keys.show()
         self._btn_play.show()
         if had_spans:  # 回放点亮的键要熄掉，否则停在这里像"还按着"
             self._keys_panel.end_playback()
         self._record_view.setExtraSelections([])
         self._refresh_playback_enabled()
         self._refresh_action_emphasis()
+
+    # -- 按键演奏的通道管理（M5） -------------------------------------------- #
+
+    def _key_target_hwnd(self) -> int:
+        """按键要打给哪个窗口：优先**框选区域所在窗口**，其次当前前台（排除自己）。
+
+        为什么不直接用前台窗口：用户常常是先框选好区域、再去点「演奏」，
+        这时前台是**本程序**；用框选区域反查窗口才等于"用户当初选的那个画面"。
+        """
+        if self._region is not None:
+            left, top, width, height = self._region
+            hwnd = inputsim.window_at(left + width // 2, top + height // 2)
+            if hwnd and not inputsim.is_own_window(hwnd):
+                return hwnd
+        hwnd = inputsim.foreground_window()
+        if hwnd and not inputsim.is_own_window(hwnd):
+            return hwnd
+        return 0
+
+    def _make_key_sink(self) -> inputsim.ForegroundKeys | inputsim.BackgroundKeys | None:
+        """按当前设置造注入通道；条件不满足时提示并返回 None。"""
+        mode = str(self._config.ui.key_play_mode or "foreground").lower()
+        hwnd = self._key_target_hwnd()
+        if hwnd == 0:
+            self._set_error(
+                "没有可注入的目标窗口：先把游戏窗口切到前台，或先「框选区域」选好琴键范围"
+            )
+            return None
+        if mode == inputsim.BackgroundKeys.mode:
+            # 后台不需要抢焦点，只需要一个活着的窗口
+            return inputsim.BackgroundKeys(hwnd)
+        hint = inputsim.injection_hint(hwnd)
+        if hint:  # UIPI：目标提权而本程序没有 → 注入会被系统静默丢弃
+            self._set_error(hint)
+            return None
+        return inputsim.ForegroundKeys(hwnd)
+
+    def _rearm_key_sink(self) -> bool:
+        """前台演奏前把目标窗口抢回前台（起播 / 暂停后继续 / 拖动后跳转都要做）。
+
+        不抢的后果不只是"打不上"：`SendInput` 打进的是**当前前台窗口**，
+        焦点在本程序时那串字母会直接进谱面文本框（改坏谱面）。
+        """
+        sink = self._key_sink
+        if sink is None or sink.mode != inputsim.ForegroundKeys.mode:
+            return True
+        hwnd = int(getattr(sink, "target_hwnd", 0) or 0)
+        if hwnd == 0:
+            return True
+        if inputsim.same_root_window(inputsim.foreground_window(), hwnd):
+            return True
+        if inputsim.activate_window(hwnd):
+            return True
+        self._set_error(
+            "抢不到游戏窗口的键盘焦点（全屏独占 / 前台锁定）—— 先点一下游戏窗口，再点「演奏」重试"
+        )
+        return False
+
+    def _sync_key_mode_button(self) -> None:
+        """刷新控制条上的通道开关（文字 + 说明）。"""
+        mode = str(self._config.ui.key_play_mode or "foreground").lower()
+        background = mode == inputsim.BackgroundKeys.mode
+        self._btn_key_mode.setText("后台" if background else "前台")
+        self._btn_key_mode.setToolTip(
+            (
+                "当前：后台 PostMessage（不抢焦点，投递给目标窗口）\n"
+                "· 适合游戏在后台 / 本程序要一直开着操作\n"
+                "· 只对读窗口消息的程序有效，走 RawInput 的游戏可能没反应\n"
+                "点一下切到「前台 SendInput」"
+            )
+            if background
+            else (
+                "当前：前台 SendInput（游戏窗口必须保持最前）\n"
+                "· 最可靠，绝大多数游戏只认这条通道\n"
+                "· 焦点离开游戏时演奏会自动停止（防止按键打进别的窗口）\n"
+                "点一下切到「后台 PostMessage」"
+            )
+        )
+
+    def _switch_key_mode(self) -> None:
+        """前台 ⇄ 后台：换通道并从当前播放头继续（原本暂停就留在暂停态）。"""
+        if not self._play_mode or self._play_kind != "keys":
+            return
+        background = str(self._config.ui.key_play_mode or "").lower() == inputsim.BackgroundKeys.mode
+        head = self._playhead_ms()
+        ordinal = self._playback.ordinal_at(head)
+        was_playing = not self._paused
+        self._config.ui.key_play_mode = "foreground" if background else "background"
+        self._save_app_config()
+        self._playback.stop(emit_state=False)  # 换通道前先停（顺带松开所有键）
+        sink = self._make_key_sink()
+        if sink is None:  # 新通道用不了（例如后台要窗口但游戏已关）→ 回退并停播
+            self._config.ui.key_play_mode = "background" if background else "foreground"
+            self._save_app_config()
+            self._sync_key_mode_button()
+            self._stop_playback()
+            return
+        self._key_sink = sink
+        self._playback.set_sink(sink)
+        self._sync_key_mode_button()
+        self._cursor = ordinal
+        self._parked_ms = head
+        # 抢不到前台就退成"暂停态"（不退出模式）：用户手动点回游戏再按播放即可
+        was_playing = was_playing and self._rearm_key_sink()
+        if not self._playback.play_from(ordinal):
+            self._stop_playback()
+            return
+        self._paused = not was_playing
+        if self._paused:
+            self._playback.pause()
+            self._parked_ms = head
+        self._sync_play_buttons()
+        self._sync_progress()
+        self._flash_status(f"已切到{sink.describe()}")
+
+    def _on_key_interrupted(self, reason: str) -> None:
+        """演奏线程报告"注入不下去了"（焦点跑了 / 窗口关了）→ 收摊。"""
+        if not self._play_mode or self._play_kind != "keys":
+            return
+        self._stop_playback()
+        self._set_error(reason)
 
     def _spans_of_current_score(self) -> tuple[KeySpan, ...]:
         """当前试听谱面的逐键区间：**只认同一次录制产生的那个 `Score` 对象**。
@@ -2650,13 +2853,18 @@ class MainWindow(QMainWindow):
         total_notes = len(self._tick_spans)
         ordinal = self._playback.ordinal_at(self._play_progress.time_of(ratio))
         self._cursor = ordinal
-        if self._scrub_was_playing:
+        # 本来在播就接着播（继续前要先把焦点还给游戏）；本来就是暂停 / 抢不到焦点都留暂停态
+        if self._scrub_was_playing and self._rearm_key_sink():
             self._paused = False
             self._parked_ms = None
             if not self._playback.play_from(ordinal):  # 重建播放器，从新位置继续
                 self._flash_status("跳转失败：谱面为空")
             self._sync_play_buttons()
         else:
+            if self._scrub_was_playing:  # 抢不到焦点：停在拖到的位置，别清掉整个演奏模式
+                self._paused = True
+                self._parked_ms = self._play_progress.time_of(ratio)
+                self._sync_play_buttons()
             self._highlight_at(ordinal)  # 留暂停态；继续播放时 _cursor != _paused_at → 会 seek
         self._sync_progress()
         self._progress_timer.start()
@@ -2667,14 +2875,30 @@ class MainWindow(QMainWindow):
         """按当前状态刷新控制条：播放中显示暂停图标，暂停时才放开快退/快进。"""
         playing = self._play_mode and not self._paused
         colors = theme.media_colors()
+        verb = "演奏" if self._play_kind == "keys" else "播放"
         self._btn_toggle_play.setIcon(
             media_icon("pause" if playing else "play", size=18, colors=colors)
         )
         self._btn_toggle_play.setToolTip(
-            "暂停（暂停后可快退/快进）" if playing else "从当前高亮处继续播放"
+            "暂停（暂停后可快退/快进）" if playing else f"从当前高亮处继续{verb}"
         )
         self._btn_rewind.setEnabled(self._play_mode and self._paused)
         self._btn_forward.setEnabled(self._play_mode and self._paused)
+        self._btn_rewind.setToolTip(
+            "快退一个和弦（按住连续后退，不发声）"
+            if self._play_kind == "audio"
+            else "快退一个和弦（按住连续后退，不发送按键）"
+        )
+        self._btn_forward.setToolTip(
+            "快进一个和弦（按住连续前进，不发声）"
+            if self._play_kind == "audio"
+            else "快进一个和弦（按住连续前进，不发送按键）"
+        )
+        self._btn_play_stop.setToolTip(
+            "停止演奏并回到「演奏」入口"
+            if self._play_kind == "keys"
+            else "停止试听并回到「试听」入口"
+        )
 
     def _toggle_pause(self) -> None:
         """播放 ⇄ 暂停。继续时：位置没动就无缝 resume，动过就 seek 到新位置。"""
@@ -2692,6 +2916,14 @@ class MainWindow(QMainWindow):
             self._flash_status(f"已暂停（{self._cursor + 1}/{total}）— 可快退/快进后继续")
             return
 
+        # 继续之前先把焦点还给游戏：暂停期间用户很可能点过本程序（拖动/快退），
+        # 前台注入这时如果直接开跑，字母键就打在界面上了。
+        if not self._rearm_key_sink():
+            # 抢不到焦点**不退出演奏模式**（退出会让人以为"点一下播放就没了"）：
+            # 留在暂停态，用户手动点回游戏后再按播放即可。
+            self._paused = True
+            self._sync_play_buttons()
+            return
         if self._cursor != self._paused_at:
             self._playback.play_from(self._cursor)  # 位置被移动过 → 从新位置重开
         elif not self._playback.resume():
@@ -2718,7 +2950,7 @@ class MainWindow(QMainWindow):
         self._flash_status(f"定位到第 {target + 1}/{total} 个和弦（点播放从这里继续）")
 
     def _stop_playback(self) -> None:
-        """停止试听：停播放器 + 退出试听模式（控制条换回播放试听）。"""
+        """停止播放：停播放器 + 退出播放模式（控制条换回两个入口按钮）。"""
         self._playback.stop()
         self._exit_play_mode()
 
@@ -2734,9 +2966,10 @@ class MainWindow(QMainWindow):
             self._paused = True
             self._sync_play_buttons()
             return
-        # idle：自然播完（或被内部 stop）→ 退出试听模式
+        # idle：自然播完（或被内部 stop）→ 退出播放模式
+        kind = self._play_kind
         self._exit_play_mode()
-        self._flash_status("试听结束")
+        self._flash_status("演奏结束" if kind == "keys" else "试听结束")
 
     def _highlight_note(self, index: int) -> None:
         """播放回调：把正在播的和弦高亮并滚动到可见。"""

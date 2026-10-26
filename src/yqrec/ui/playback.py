@@ -23,6 +23,10 @@ ctl.duration_ms             # 全曲总长（末音 onset + 延音）
 ctl.ordinal_at(ms)          # 毫秒 → 和弦下标（拖进度条跳转用）
 ```
 
+**两种输出（M5）**：`load(..., mode="audio")` 走 `Player` + `AudioEngine`（软件内发声）；
+`load(..., mode="keys", sink=…)` 走 `KeyPlayer` + 键鼠注入（让游戏自己发声）。
+两者对外接口完全一致，所以主窗口的进度条/暂停/快进/拖动逻辑一套代码复用于两种模式。
+
 **为什么播放头在控制器里算**：`Player` 在后台线程按绝对时间表走，主线程没有"现在几毫秒"
 这个量；若 UI 自己记锚点，`pause → resume`（引擎内部按暂停时长顺延 `t0`）与 `play_from`
 （重建播放器）两处都要跟着重算，容易偏。锚点只在控制器维护一份。
@@ -39,9 +43,16 @@ from ..instruments import assets_dir
 from ..logging import get_logger
 from ..player.audio import AudioEngine
 from ..player.engine import Player, PlayerState
+from ..player.keys import KeyPlayer
 from ..types import InstrumentSpec, NoteEvent, Score
 
 _log = get_logger("ui.playback")
+
+MODE_AUDIO = "audio"
+"""播放到软件内的采样引擎（试听）。"""
+
+MODE_KEYS = "keys"
+"""播放成键盘注入（演奏）：游戏自己发声。"""
 
 
 class PlaybackController(QObject):
@@ -53,14 +64,21 @@ class PlaybackController(QObject):
     state_changed = Signal(str)
     """`"playing"` / `"idle"`（播完或手动停止都回 idle）。"""
 
+    interrupted = Signal(str)
+    """演奏被迫中断（目标窗口跑焦点 / 被关掉）。参数是给人看的一句话。"""
+
     def __init__(self, parent: QObject | None = None, *, audio_enabled: bool = True) -> None:
         super().__init__(parent)
         self._audio_enabled = audio_enabled
         self._score: Score | None = None
         self._spec: InstrumentSpec | None = None
+        self._mode = MODE_AUDIO
+        self._sink = None
+        """按键演奏的输出通道（`inputsim.ForegroundKeys` / `BackgroundKeys`）；
+        音频模式恒为 None。"""
         self._audio: AudioEngine | None = None
         self._audio_spec_id: str | None = None
-        self._player: Player | None = None
+        self._player: Player | KeyPlayer | None = None
         self._suppress_state = False
         """换播放器期间屏蔽状态转发。
 
@@ -122,8 +140,14 @@ class PlaybackController(QObject):
     def duration_ms(self) -> float:
         """全曲总长：末音 `onset + sustain`（末音是延音时进度条不会提前满格）。
 
+        按键演奏还多一层"最短按住"：谱面末音没有延音时，实际要按到
+        `onset + min_hold`，所以优先取 `KeyPlayer` 算好的时间轴总长。
+
         至少 1.0，调用方做除法不用再判零。
         """
+        player = self._player
+        if isinstance(player, KeyPlayer):
+            return max(1.0, float(player.duration_ms))
         notes = self.notes()
         if not notes:
             return 0.0
@@ -161,17 +185,38 @@ class PlaybackController(QObject):
 
     # -- 装载 -------------------------------------------------------------- #
 
-    def load(self, score: Score, spec: InstrumentSpec) -> None:
-        """换谱面/换乐器：先停掉在播的，再绑定新的。"""
+    def load(
+        self,
+        score: Score,
+        spec: InstrumentSpec,
+        *,
+        mode: str = MODE_AUDIO,
+        sink=None,
+    ) -> None:
+        """换谱面/换乐器/换输出通道：先停掉在播的，再绑定新的。
+
+        `mode="keys"` 时 `sink` 必须给（`inputsim.make_key_sink()` 造出来的通道）——
+        控制器只负责按时间表调它的 `key_down/key_up`，怎么注入由通道自己决定。
+        """
         self.stop()
         self._score = score
         self._spec = spec
+        self._mode = MODE_KEYS if str(mode).lower() == MODE_KEYS else MODE_AUDIO
+        self._sink = sink if self._mode == MODE_KEYS else None
         self._ordinal_of_event = {}
         ordinal = 0
         for index, event in enumerate(score.events):
             if isinstance(event, NoteEvent):
                 self._ordinal_of_event[index] = ordinal
                 ordinal += 1
+
+    def set_sink(self, sink) -> None:
+        """换注入通道（前台 ⇄ 后台）：调用方应先 `stop()`，下一次 `play_from` 生效。"""
+        self._sink = sink if self._mode == MODE_KEYS else None
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     def _on_player_state(self, state: PlayerState) -> None:
         """`Player.on_state` 的唯一出口（受 `_suppress_state` 控制）。"""
@@ -202,13 +247,19 @@ class PlaybackController(QObject):
         self._suppress_state = True  # 换播放器期间旧 player 的 idle 不能漏给 UI
         try:
             self.stop(emit_state=False)
-            audio = self._ensure_audio()
-            player = Player(
-                self._score,
-                audio=audio,
-                speed=1.0,
-                note_of_key=self._spec.note_of_key,
-            )
+            if self._mode == MODE_KEYS:
+                if self._sink is None:
+                    _log.warning("按键演奏缺少注入通道，已取消")
+                    return False
+                player: Player | KeyPlayer = KeyPlayer(self._score, self._sink, speed=1.0)
+                player.on_interrupt = self._on_key_interrupt
+            else:
+                player = Player(
+                    self._score,
+                    audio=self._ensure_audio(),
+                    speed=1.0,
+                    note_of_key=self._spec.note_of_key,
+                )
             player.on_note = lambda _event, index: self._emit_note(index)
             player.on_state = self._on_player_state
             self._player = player
@@ -254,6 +305,12 @@ class PlaybackController(QObject):
 
     def close(self) -> None:
         self.stop()
+        sink, self._sink = self._sink, None
+        if sink is not None:
+            try:
+                sink.release_all()  # 兜底：绝不让游戏里的琴键卡在按下状态
+            except Exception as exc:
+                _log.debug("释放按键失败（已忽略）: %s", exc)
         audio, self._audio = self._audio, None
         if audio is not None:
             try:
@@ -263,6 +320,10 @@ class PlaybackController(QObject):
         self._audio_spec_id = None
 
     # -- 内部 -------------------------------------------------------------- #
+
+    def _on_key_interrupt(self, reason: str) -> None:
+        """演奏线程发现目标窗口不可注入 → 转成 Qt 信号（在播放线程里被调用）。"""
+        self.interrupted.emit(str(reason))
 
     def _emit_note(self, event_index: int) -> None:
         """播放线程回调 → `events` 下标换成和弦序号再发信号。"""
