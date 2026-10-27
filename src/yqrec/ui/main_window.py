@@ -151,6 +151,13 @@ KEY_DELAY_TICK_MS = 200
 KEY_FLASH_MIN_MS = 60
 """试听回放时一次按下至少点亮多久（ms）：40ms 采样下短于这个值可能整帧跳过。"""
 
+KEY_PLAY_ENTRY_VISIBLE = False
+"""「演奏」入口按钮是否可见（临时下线开关，默认隐藏）。
+
+只为"暂时不想让它出现在界面上"：按键时间轴、前后台注入、起播倒计时这些实现
+全部保留在代码里，改回 ``True`` 就恢复入口，不需要动别处。
+"""
+
 RADIUS_MIN = 20
 RADIUS_MAX_RING = 95
 RADIUS_MAX_SQUARE = 150
@@ -719,6 +726,8 @@ class MainWindow(QMainWindow):
             "前台 = SendInput，游戏窗口必须在最前；后台 = PostMessage，不抢焦点"
         )
         self._btn_play_keys.clicked.connect(self._toggle_key_play)
+        # 入口默认隐藏（`KEY_PLAY_ENTRY_VISIBLE`）：布局会跳过隐藏控件，不留空位。
+        self._btn_play_keys.setVisible(KEY_PLAY_ENTRY_VISIBLE)
 
         # 试听控制条（M2q.9）：进入试听模式后**原地替换**「试听」按钮
         self._play_bar = QWidget()
@@ -2720,7 +2729,7 @@ class MainWindow(QMainWindow):
         self._actions_row.invalidate()
         self._play_bar.hide()
         self._btn_key_mode.hide()
-        self._btn_play_keys.show()
+        self._btn_play_keys.setVisible(KEY_PLAY_ENTRY_VISIBLE)
         self._btn_play.show()
         if had_spans:  # 回放点亮的键要熄掉，否则停在这里像"还按着"
             self._keys_panel.end_playback()

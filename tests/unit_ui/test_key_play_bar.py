@@ -283,7 +283,10 @@ def test_stop_returns_to_both_entries(window, monkeypatch: pytest.MonkeyPatch) -
     assert win._play_mode is False
     assert win._play_kind == "audio", "退出后回到默认（音频）语义"
     assert win._btn_play.isVisibleTo(win) is True
-    assert win._btn_play_keys.isVisibleTo(win) is True
+    # 入口是否露出来由开关决定（当前临时隐藏），退出演奏后要回到开关的状态
+    from yqrec.ui.main_window import KEY_PLAY_ENTRY_VISIBLE
+
+    assert win._btn_play_keys.isVisibleTo(win) is KEY_PLAY_ENTRY_VISIBLE
     assert win._btn_key_mode.isVisibleTo(win) is False
     assert sink.events[-1] == ("release", ""), "退出时兜底松开所有键"
     win.close()
