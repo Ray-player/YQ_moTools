@@ -353,6 +353,32 @@ def load_key_play_delay_ms(path: Path | str | None = None) -> int:
     return delay
 
 
+def load_key_play_entry_visible(path: Path | str | None = None) -> bool:
+    """「演奏」入口按钮是否显示（全局参数 `key_play_entry_visible`，int）。
+
+    取值：``0`` = 隐藏（**默认**，也用于其它整数/非法值的兜底）；``1`` = 显示。
+    这是"功能开关"而不是偏好：想让演奏功能先不出现在界面上就填 0，
+    实现全部保留，填回 1（或按 F5 重读）入口就回来了。绝不抛。
+    """
+    p = Path(path) if path else instruments_path()
+    try:
+        data = _read_json(p)
+    except (OSError, ValueError) as exc:
+        _log.warning("读取 key_play_entry_visible 失败（%s），按隐藏处理", exc)
+        return False
+    raw = data.get("key_play_entry_visible")
+    if raw is None:
+        return False
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        _log.warning("key_play_entry_visible=%r 不是整数，按隐藏处理", raw)
+        return False
+    if value not in (0, 1):
+        _log.warning("key_play_entry_visible=%s 只认 0/1，按 %d 处理", value, 1 if value else 0)
+    return value != 0
+
+
 def load_instruments(path: Path | str | None = None) -> dict[str, InstrumentSpec]:
     """加载乐器表，返回 `{id: InstrumentSpec}`（**插入顺序 = JSON 顺序 = 下拉顺序**）。"""
     p = Path(path) if path else instruments_path()

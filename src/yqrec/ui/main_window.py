@@ -74,6 +74,7 @@ from ..instruments import (
     instruments_mtime,
     load_instruments,
     load_key_play_delay_ms,
+    load_key_play_entry_visible,
     load_record_click,
     load_sampling,
     resolve_instrument_id,
@@ -150,13 +151,6 @@ KEY_DELAY_TICK_MS = 200
 
 KEY_FLASH_MIN_MS = 60
 """试听回放时一次按下至少点亮多久（ms）：40ms 采样下短于这个值可能整帧跳过。"""
-
-KEY_PLAY_ENTRY_VISIBLE = False
-"""「演奏」入口按钮是否可见（临时下线开关，默认隐藏）。
-
-只为"暂时不想让它出现在界面上"：按键时间轴、前后台注入、起播倒计时这些实现
-全部保留在代码里，改回 ``True`` 就恢复入口，不需要动别处。
-"""
 
 RADIUS_MIN = 20
 RADIUS_MAX_RING = 95
@@ -726,8 +720,10 @@ class MainWindow(QMainWindow):
             "前台 = SendInput，游戏窗口必须在最前；后台 = PostMessage，不抢焦点"
         )
         self._btn_play_keys.clicked.connect(self._toggle_key_play)
-        # 入口默认隐藏（`KEY_PLAY_ENTRY_VISIBLE`）：布局会跳过隐藏控件，不留空位。
-        self._btn_play_keys.setVisible(KEY_PLAY_ENTRY_VISIBLE)
+        # 是否露出来由 `assets/instruments.json` 的 `key_play_entry_visible` 定（0=隐藏/1=显示）：
+        # 布局会跳过隐藏控件，所以隐藏时不留空位，底栏看起来和没这个功能一样。
+        self._key_play_entry_visible = self._read_key_play_entry_visible()
+        self._btn_play_keys.setVisible(self._key_play_entry_visible)
 
         # 试听控制条（M2q.9）：进入试听模式后**原地替换**「试听」按钮
         self._play_bar = QWidget()
@@ -1342,6 +1338,7 @@ class MainWindow(QMainWindow):
                     self._baseline, self._channel_by_area, self._thresholds
                 )
         self._sync_instrument_model()  # preview_only 可能在 JSON 里被改过
+        self._sync_key_play_entry()  # key_play_entry_visible 也可能刚被改过
         self._apply_detection_spec(self._spec)
         self._sync_sampler_options()
         self._sync_radius_slider()
@@ -2729,7 +2726,8 @@ class MainWindow(QMainWindow):
         self._actions_row.invalidate()
         self._play_bar.hide()
         self._btn_key_mode.hide()
-        self._btn_play_keys.setVisible(KEY_PLAY_ENTRY_VISIBLE)
+        # 退出时按 JSON 开关还原（别写死 show()，否则隐藏的入口会自己冒出来）
+        self._btn_play_keys.setVisible(self._key_play_entry_visible)
         self._btn_play.show()
         if had_spans:  # 回放点亮的键要熄掉，否则停在这里像"还按着"
             self._keys_panel.end_playback()
@@ -3070,6 +3068,30 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # 配置读不到不该把演奏拦下来
             _log.warning("读取 key_play_delay_ms 失败（%s），按 0 处理", exc)
             return 0
+
+    def _read_key_play_entry_visible(self) -> bool:
+        """「演奏」入口该不该显示（全局参数 `key_play_entry_visible`：0=隐藏 1=显示）。"""
+        try:
+            return bool(load_key_play_entry_visible())
+        except Exception as exc:  # 配置读不到 → 按默认隐藏，别把窗口建不出来
+            _log.warning("读取 key_play_entry_visible 失败（%s），按隐藏处理", exc)
+            return False
+
+    def _sync_key_play_entry(self) -> None:
+        """按 JSON 刷新「演奏」入口的显隐（F5 / 配置重读 / 启动各一次）。
+
+        演奏进行中不动按钮：那时入口本来就该藏起来，由控制条占位；退出演奏时
+        `_exit_play_mode()` 会用同一个字段还原，所以这里只管"不忙的时候"。
+        """
+        if not hasattr(self, "_btn_play_keys"):  # 还没建界面（极少见，防御一下）
+            return
+        self._key_play_entry_visible = self._read_key_play_entry_visible()
+        if self._play_mode:
+            return
+        changed = self._btn_play_keys.isVisibleTo(self) != self._key_play_entry_visible
+        self._btn_play_keys.setVisible(self._key_play_entry_visible)
+        if changed:  # 显隐会改变这一行的宽度，让布局立刻重算，别等下一次 resize
+            self._actions_row.invalidate()
 
     def _schedule_key_start(self, play: Callable[[], None]) -> bool:
         """起播/继续前先倒计时；返回 `True` 表示"正在倒计时，先别起播"。

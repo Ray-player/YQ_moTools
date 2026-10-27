@@ -283,10 +283,8 @@ def test_stop_returns_to_both_entries(window, monkeypatch: pytest.MonkeyPatch) -
     assert win._play_mode is False
     assert win._play_kind == "audio", "退出后回到默认（音频）语义"
     assert win._btn_play.isVisibleTo(win) is True
-    # 入口是否露出来由开关决定（当前临时隐藏），退出演奏后要回到开关的状态
-    from yqrec.ui.main_window import KEY_PLAY_ENTRY_VISIBLE
-
-    assert win._btn_play_keys.isVisibleTo(win) is KEY_PLAY_ENTRY_VISIBLE
+    # 入口是否露出来由 instruments.json 的 key_play_entry_visible 决定（当前默认 0=隐藏）
+    assert win._btn_play_keys.isVisibleTo(win) is win._key_play_entry_visible
     assert win._btn_key_mode.isVisibleTo(win) is False
     assert sink.events[-1] == ("release", ""), "退出时兜底松开所有键"
     win.close()
@@ -406,4 +404,44 @@ def test_start_delay_reads_global_param(window, monkeypatch) -> None:
 
     monkeypatch.setattr(mw, "load_key_play_delay_ms", boom)
     assert win._key_start_delay_ms() == 0, "配置读不到时不许拦下演奏"
+    win.close()
+
+
+def test_entry_visibility_follows_json_switch(window, monkeypatch) -> None:
+    """M6h：入口显隐由 `instruments.json` 的 `key_play_entry_visible` 控制（0=隐藏 1=显示）。"""
+    from yqrec.ui import main_window as mw
+
+    win, app = window
+    assert win._btn_play_keys.isVisibleTo(win) is False, "默认 0 → 隐藏"
+
+    monkeypatch.setattr(mw, "load_key_play_entry_visible", lambda: True)
+    win._sync_key_play_entry()
+    app.processEvents()
+    assert win._btn_play_keys.isVisibleTo(win) is True, "填 1 并按 F5 → 入口回来"
+    assert win._key_play_entry_visible is True
+
+    monkeypatch.setattr(mw, "load_key_play_entry_visible", lambda: False)
+    win._sync_key_play_entry()
+    app.processEvents()
+    assert win._btn_play_keys.isVisibleTo(win) is False, "改回 0 → 又藏起来"
+    win.close()
+
+
+def test_entry_visibility_reload_keeps_state_while_playing(window, monkeypatch) -> None:
+    """演奏中按 F5 不要把入口按钮塞回控制条位置，退出时再按开关还原。"""
+    from yqrec.ui import main_window as mw
+
+    win, app = window
+    monkeypatch.setattr(win, "_make_key_sink", lambda: RecordingSink())
+    monkeypatch.setattr(mw, "load_key_play_entry_visible", lambda: True)
+    win._btn_play_keys.click()  # 隐藏按钮也能程序化触发（真实场景入口可见）
+    app.processEvents()
+    assert win._play_mode is True
+
+    monkeypatch.setattr(mw, "load_key_play_entry_visible", lambda: False)
+    win._sync_key_play_entry()
+    assert win._key_play_entry_visible is False, "开关记下来"
+    win._stop_playback()
+    app.processEvents()
+    assert win._btn_play_keys.isVisibleTo(win) is False, "退出后按最新开关还原"
     win.close()

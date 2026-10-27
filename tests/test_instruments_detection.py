@@ -22,6 +22,7 @@ from yqrec.instruments import (
     load_instrument,
     load_instruments,
     load_key_play_delay_ms,
+    load_key_play_entry_visible,
     load_sampling,
     parse_detection,
     parse_sampling,
@@ -275,3 +276,32 @@ def test_key_play_delay_is_shared_by_all_instruments(tmp_path) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     assert load_key_play_delay_ms(path) == 1500
     assert len(load_instruments(path)) >= 6, "全局参数不该影响乐器解析"
+
+
+def test_key_play_entry_visible_default_off() -> None:
+    """M6h：「演奏」入口显隐是全局 int 开关，默认 0（隐藏）。"""
+    assert load_key_play_entry_visible() is False
+
+
+def test_key_play_entry_visible_reads_json(tmp_path) -> None:
+    """1 = 显示，0 = 隐藏；缺项/非整数一律按隐藏；非 0 值当 1 处理并记 warning。"""
+    data = json.loads(ASSETS.read_text(encoding="utf-8"))
+
+    # 每个用例写**独立文件**：`_read_json` 按 (mtime, size) 缓存，
+    # 同尺寸内容（"0" 与 "1" 字节数一样）在同一时间戳刻度内重写会被当成没变。
+    for index, (raw, expected) in enumerate(
+        ((1, True), (0, False), ("1", True), (2, True), (None, False))
+    ):
+        payload = dict(data)
+        if raw is None:
+            payload.pop("key_play_entry_visible", None)
+        else:
+            payload["key_play_entry_visible"] = raw
+        path = tmp_path / f"instruments_{index}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        assert load_key_play_entry_visible(path) is expected, (raw, expected)
+
+    bad = dict(data, key_play_entry_visible="abc")
+    path = tmp_path / "instruments_bad.json"
+    path.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+    assert load_key_play_entry_visible(path) is False, "非法值不许把按钮亮出来"
