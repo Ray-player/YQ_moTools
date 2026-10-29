@@ -44,3 +44,97 @@ def test_detach_cwd_ignores_relative_temp(monkeypatch: pytest.MonkeyPatch) -> No
     before = Path.cwd()
     _detach_cwd()
     assert Path.cwd() == before
+
+
+def test_sticky_data_dir_keeps_old_dir_when_primary_is_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """提权后主目录突然能写，但里面是空的 → 继续用已有存档的旧目录。
+
+    否则用户看到的是"标定档没了、窗口大小回默认"（数据其实还在旧目录里）。
+    """
+    from yqrec import app
+
+    primary = tmp_path / "appdata"
+    fallback = tmp_path / "exe_data"
+    primary.mkdir()
+    (fallback / "profiles").mkdir(parents=True)
+    (fallback / "profiles" / "default.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(app, "_fallback_candidates", lambda: [fallback])
+    monkeypatch.setattr(app, "probe_writable_quiet", lambda _p: True)
+    monkeypatch.delenv("YQREC_DATA_DIR", raising=False)
+
+    note, detail = app._sticky_data_dir(primary, "Temp")
+    try:
+        assert os.environ.get("YQREC_DATA_DIR") == str(fallback)
+        assert note and str(fallback) in detail
+    finally:
+        os.environ.pop("YQREC_DATA_DIR", None)
+
+
+def test_sticky_data_dir_yields_to_primary_with_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """主目录自己已经有存档 → 以主目录为准（用户真搬过数据时不能被拽回去）。"""
+    from yqrec import app
+
+    primary = tmp_path / "appdata"
+    fallback = tmp_path / "exe_data"
+    (primary / "profiles").mkdir(parents=True)
+    (primary / "profiles" / "default.json").write_text("{}", encoding="utf-8")
+    fallback.mkdir()
+    (fallback / "settings.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(app, "_fallback_candidates", lambda: [fallback])
+    monkeypatch.setattr(app, "probe_writable_quiet", lambda _p: True)
+    monkeypatch.delenv("YQREC_DATA_DIR", raising=False)
+
+    note, _detail = app._sticky_data_dir(primary, "Temp")
+    assert note == ""
+    assert os.environ.get("YQREC_DATA_DIR") is None
+
+
+def test_sticky_data_dir_keeps_old_dir_when_primary_is_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """提权后主目录突然能写，但里面是空的 → 继续用已有存档的旧目录。
+
+    否则用户看到的是"标定档没了、窗口大小回默认"（数据其实还在旧目录里）。
+    """
+    from yqrec import app
+
+    primary = tmp_path / "appdata"
+    fallback = tmp_path / "exe_data"
+    primary.mkdir()
+    (fallback / "profiles").mkdir(parents=True)
+    (fallback / "profiles" / "default.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(app, "_fallback_candidates", lambda: [fallback])
+    monkeypatch.setattr(app, "probe_writable_quiet", lambda _p: True)
+    monkeypatch.delenv("YQREC_DATA_DIR", raising=False)
+
+    note, detail = app._sticky_data_dir(primary, "Temp")
+    try:
+        assert os.environ.get("YQREC_DATA_DIR") == str(fallback)
+        assert note and str(fallback) in detail
+    finally:
+        os.environ.pop("YQREC_DATA_DIR", None)
+
+
+def test_sticky_data_dir_yields_to_primary_with_records(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """主目录自己已经有存档 → 以主目录为准（用户真搬过数据时不能被拽回去）。"""
+    from yqrec import app
+
+    primary = tmp_path / "appdata"
+    fallback = tmp_path / "exe_data"
+    (primary / "profiles").mkdir(parents=True)
+    (primary / "profiles" / "default.json").write_text("{}", encoding="utf-8")
+    fallback.mkdir()
+    (fallback / "settings.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(app, "_fallback_candidates", lambda: [fallback])
+    monkeypatch.setattr(app, "probe_writable_quiet", lambda _p: True)
+    monkeypatch.delenv("YQREC_DATA_DIR", raising=False)
+
+    note, _detail = app._sticky_data_dir(primary, "Temp")
+    assert note == ""
+    assert os.environ.get("YQREC_DATA_DIR") is None

@@ -11,6 +11,7 @@ from yqrec.formats.bgi_sheet import score_from_tick_text
 from yqrec.player.engine import PlayerState
 from yqrec.player.keys import (
     DEFAULT_KEY_HOLD_MS,
+    KEY_FAIL_STREAK_LIMIT,
     RETRIGGER_GAP_MS,
     KeyPlayer,
     build_key_timeline,
@@ -209,3 +210,57 @@ def test_blocked_sink_keeps_playing_instead_of_interrupting() -> None:
     assert blocked == [True], "只提示一次状态翻转"
     assert player.state is PlayerState.IDLE, "必须一路播到底"
     assert sink.pressed() == [], "全程没有真发键"
+
+
+def test_inject_failures_interrupt_after_limit() -> None:
+    """能发却发不出去（UIPI 丢弃 / 拦截）连续 N 次 → 中断并给出可读懂的原因。
+
+    BetterGI 的 SendInput 封装是"失败即抛异常"，用户立刻知道没发出去；
+    我们这边注入在自己的线程里跑，抛出去没人接，所以改成累计后中断。
+    """
+
+    class FailingSink(FakeSink):
+        """down/up 全部发不出去：与 UIPI 丢弃时"SendInput 返回 0"的真机表现一致。"""
+
+        def key_down(self, key: str) -> bool:
+            self.events.append(("down", key))
+            return False
+
+        def key_up(self, key: str) -> bool:
+            self.events.append(("up", key))
+            return False
+
+    sink = FailingSink()
+    reasons: list[str] = []
+    player = KeyPlayer(score_from_tick_text("A200B200C200D200E200F"), sink)
+    player.on_interrupt = reasons.append
+    player.play()
+    wait_idle(player, limit=5.0)
+
+    assert reasons, "连续注入失败必须中断，不能安静地弹完"
+    assert "注入连续失败" in reasons[0]
+    assert len(sink.pressed()) <= KEY_FAIL_STREAK_LIMIT, "达到阈值就停，不再继续空弹"
+
+
+def test_single_inject_failure_does_not_interrupt() -> None:
+    """偶发一次失败不该中断（切窗口的瞬间很常见）。"""
+
+    class FlakySink(FakeSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def key_down(self, key: str) -> bool:
+            self.calls += 1
+            self.events.append(("down", key))
+            return self.calls != 1  # 只有第一次失败
+
+    sink = FlakySink()
+    reasons: list[str] = []
+    player = KeyPlayer(score_from_tick_text("A200B200C"), sink)
+    player.on_interrupt = reasons.append
+    player.play()
+    wait_idle(player, limit=4.0)
+
+    assert not reasons, f"偶发失败不该中断: {reasons}"
+    assert player.state is PlayerState.IDLE

@@ -37,6 +37,20 @@ DEFAULT_KEY_HOLD_MS = 60.0
 RETRIGGER_GAP_MS = 30.0
 """同一键"交叠重按"时提前抬起多少毫秒（抄 BetterGI 的 RetriggerGap）。"""
 
+KEY_FAIL_STREAK_LIMIT = 5
+"""连续这么多次"明明能发却发不出去"就中断演奏。
+
+BetterGI 的 SendInput 封装是**失败即抛异常**，用户立刻看到红字；我们这边注入在自己的
+线程里跑，抛出去没人接，只能改成累计 N 次后走 `_interrupt()`：把演奏停在暂停态，
+并在状态栏说清原因（"目标程序可能以管理员运行"）。否则表现就是安静地"弹了但没声音"。
+"""
+
+_INJECT_FAIL_REASON = (
+    "按键注入连续失败 {limit} 次 —— 目标程序可能以管理员权限运行，"
+    "本程序没有（详见日志 injection_hint）"
+)
+
+
 
 @dataclass(frozen=True, slots=True)
 class KeyAction:
@@ -138,6 +152,8 @@ class KeyPlayer:
         self.on_interrupt: Callable[[str], None] | None = None
         self.on_blocked: Callable[[bool], None] | None = None
         self._blocked = False
+        self._fail_streak = 0
+        """连续注入失败次数（`ready()` 为真却发不出去），达 `KEY_FAIL_STREAK_LIMIT` 就中断。"""
 
     # -- 属性 -------------------------------------------------------------- #
 
@@ -176,6 +192,7 @@ class KeyPlayer:
         self._stop.clear()
         self._pause.clear()
         self._blocked = False
+        self._fail_streak = 0
         self._set_state(PlayerState.PLAYING)
         self._thread = threading.Thread(
             target=self._run, args=(start_ms, loop), name="yqrec-keyplayer", daemon=True
@@ -273,7 +290,8 @@ class KeyPlayer:
                             t0 += time.perf_counter() - pause_start
                             self._restore_held(self._last_at_ms)
                         time.sleep(min(0.005, max(0.0, target - time.perf_counter())))
-                    if not self._sink.ready():
+                    ready = self._sink.ready()
+                    if not ready:
                         if getattr(self._sink, "interrupt_when_blocked", True):
                             self._interrupt("目标窗口已关闭 —— 演奏已停止")
                             return
@@ -283,10 +301,20 @@ class KeyPlayer:
                         self._note_blocked(True)
                     else:
                         self._note_blocked(False)
-                    if action.down:
+                    sent = (
                         self._sink.key_down(action.key)
+                        if action.down
+                        else self._sink.key_up(action.key)
+                    )
+                    # "能发但没发出去"才是真故障（UIPI 丢弃 / 安全软件拦截 / 输入桌面不对）。
+                    # 被挡住（上面 ready() 为假）的那几拍由 sink 自己记账，不在这里算失败。
+                    if ready and not sent:
+                        self._fail_streak += 1
+                        if self._fail_streak >= KEY_FAIL_STREAK_LIMIT:
+                            self._interrupt(_INJECT_FAIL_REASON.format(limit=KEY_FAIL_STREAK_LIMIT))
+                            return
                     else:
-                        self._sink.key_up(action.key)
+                        self._fail_streak = 0
                     self._last_at_ms = action.at_ms
                     if action.down and self.on_note:
                         self.on_note(self._score.events[action.event_index], action.event_index)

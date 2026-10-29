@@ -7,9 +7,9 @@
   激活流程抄 MAA ``ForegroundUtils.h`` 的三段式（提层 → SetForegroundWindow
   → 复核，失败再 TOPMOST↔NOTOPMOST 强提）；
 - **琴键演奏的字母键按下/抬起**（`ForegroundKeys` / `BackgroundKeys`，M5）：
-  前台走 SendInput + 扫描码，打给**当前激活窗口**（激活的是本进程就这一拍不发，
-  但**不中断**演奏，见 `interrupt_when_blocked`）；后台走
-  ``PostMessage(WM_KEYDOWN/UP)`` 到目标窗口，目标没了只能中断。
+  前台走 SendInput（虚拟键码 + 扫描码双填，见 `_key_input()`），打给**当前激活窗口**
+  （激活的是本进程就这一拍不发，但**不中断**演奏，见 `interrupt_when_blocked`）；
+  后台走 ``PostMessage(WM_KEYDOWN/UP)`` 到目标窗口，目标没了只能中断。
   两条通道的语义与 BetterGI 的 ``SendInputChannel`` / ``PostMessageChannel`` 对齐。
 
 后续要扩展时保持三条约定：
@@ -48,6 +48,7 @@ SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
 UOI_NAME = 2
+KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
 VK_SPACE = 0x20
@@ -146,13 +147,22 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", ctypes.c_ulong), ("u", _U)]
 
 
+def _dispatch(inp: _INPUT) -> bool:
+    """把一条 `INPUT` 交给 `SendInput`；成功返回 True。
+
+    单独拆出来是为了**可测**：真机注入没法在单测里跑，但"构造出来的 INPUT 长什么样"
+    必须能验（`_key_input()` 的字段单测就靠替换这个函数拿到入参）。
+    """
+    return user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) == 1
+
+
 def _send_mouse(flags: int, dx: int = 0, dy: int = 0) -> bool:
     """投递一条鼠标事件；失败记 warning 返回 False。"""
     inp = _INPUT(type=INPUT_MOUSE)
     inp.mi.dx = int(dx)
     inp.mi.dy = int(dy)
     inp.mi.dwFlags = flags
-    if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) != 1:
+    if not _dispatch(inp):
         _log.warning("SendInput(0x%x) 失败: winerror=%s", flags, ctypes.get_last_error())
         return False
     return True
@@ -202,18 +212,38 @@ def move_cursor(x: int, y: int) -> bool:
     return False
 
 
-def _send_key(vk: int, flags: int) -> bool:
-    """投递一条键盘事件；失败记 warning 返回 False。
+def _key_input(vk: int, flags: int) -> _INPUT:
+    """构造一条键盘 `INPUT`：**虚拟键码与扫描码同时填**（与 BetterGI `InputBuilder` 一致）。
 
-    `flags` 含 `KEYEVENTF_SCANCODE` 时按**扫描码**发（`wVk` 必须为 0）—— DirectInput /
-    RawInput 的游戏（原神这类 Unity 游戏）常常只认扫描码，VK-only 的注入会被它们无视。
+    为什么要双填（2026-10-29 起，取代原来的"只发扫描码"）：
+
+    - 旧写法是 `wVk=0` + `KEYEVENTF_SCANCODE` —— 系统要按**当前键盘布局**把扫描码
+      反查成虚拟键。布局不是 US-QWERTY、或输入法处于激活态时，推出的可能是别的字符；
+      而且 `GetKeyState(VK_X)` 这类查询看不到按下态（BetterGI 的收尾 `ReleaseAllKey`
+      就是靠它判断的）。
+    - 双填后两条信息都在：RawInput / DirectInput（原神这类 Unity 游戏）照旧读扫描码，
+      普通窗口与 `GetAsyncKeyState` 读 VK，各取所需，也不依赖布局。
+    - 扫描码字段**始终**写（`flags` 带 `KEYEVENTF_SCANCODE` 时只是额外把 `wVk` 置 0），
+      所以"只认扫描码"的极端环境仍可用 `press_space(use_scan_code=True)` 兜底。
+
+    扩展键（方向键、小键盘等）要靠 `KEYEVENTF_EXTENDEDKEY` 标记，扫描码被截到低 8 位
+    时这个标志位是唯一的扩展信息 —— 琴键（A-Z）与空格都不是扩展键，当前用不到。
     """
     inp = _INPUT(type=INPUT_KEYBOARD)
-    inp.ki.wVk = 0 if flags & KEYEVENTF_SCANCODE else vk
-    inp.ki.dwFlags = flags
-    if flags & KEYEVENTF_SCANCODE:
-        inp.ki.wScan = int(user32.MapVirtualKeyW(vk, 0))  # MAPVK_VK_TO_VSC
-    if user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) != 1:
+    inp.ki.wScan = int(user32.MapVirtualKeyW(int(vk), 0)) & 0xFF
+    inp.ki.wVk = 0 if flags & KEYEVENTF_SCANCODE else int(vk) & 0xFFFF
+    inp.ki.dwFlags = int(flags)
+    return inp
+
+
+def _send_key(vk: int, flags: int = 0) -> bool:
+    """投递一条键盘事件；失败记 warning 返回 False。
+
+    字段填法见 `_key_input()`：默认**VK + 扫描码双填**，`flags` 带 `KEYEVENTF_SCANCODE`
+    时退回只发扫描码（老兜底路径）。DirectInput / RawInput 的游戏（原神这类 Unity 游戏）
+    常常只认扫描码，而普通窗口只认 VK —— 双填两边都满足。
+    """
+    if not _dispatch(_key_input(vk, flags)):
         _log.warning("SendInput(VK=0x%x, 0x%x) 失败: winerror=%s", vk, flags, ctypes.get_last_error())
         return False
     return True
@@ -429,13 +459,15 @@ def environment_report() -> str:
     )
 
 
-def press_space(*, hold_ms: int = 60, use_scan_code: bool = True) -> bool:
+def press_space(*, hold_ms: int = 60, use_scan_code: bool = False) -> bool:
     """向前台窗口模拟一次空格按下→抬起。
 
     **调用方必须先确认目标窗口确实在前台**（见 ``activate_window``）——
     空格落到本程序焦点控件上会触发按钮（如再次点中「录制」立即停录）。
 
-    `use_scan_code=True` 走扫描码（DirectInput / RawInput 的游戏才认，见 `_send_key`）。
+    `use_scan_code=False`（默认）走 `_key_input()` 的 **VK + 扫描码双填**：
+    扫描码照旧带上，所以 DirectInput / RawInput 的游戏（原神）能认；同时 VK 也在，
+    不再依赖当前键盘布局反查。要退回"只发扫描码"的老路径时传 True。
     """
     flags = KEYEVENTF_SCANCODE if use_scan_code else 0
     ok = _send_key(VK_SPACE, flags)
@@ -641,7 +673,7 @@ class ForegroundKeys:
         回到游戏时先补这些 up，避免琴键卡死。多出来的 up 对游戏没有任何副作用。
         """
         for letter in list(self._pending_up):
-            _send_key(virtual_key(letter), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
+            _send_key(virtual_key(letter), KEYEVENTF_KEYUP)
             self._pressed.discard(letter)
             self._pending_up.discard(letter)
 
@@ -654,7 +686,7 @@ class ForegroundKeys:
                 self._flush_pending_up()
             if letter in self._pressed:  # 同键重复 down 会被游戏当成系统自动重复，丢掉
                 return True
-            if not _send_key(virtual_key(letter), KEYEVENTF_SCANCODE):
+            if not _send_key(virtual_key(letter)):
                 return False
             self._pressed.add(letter)
             return True
@@ -669,14 +701,14 @@ class ForegroundKeys:
                 # 注意**不从 `_pressed` 里删**：那键在游戏里确实还是按下状态。
                 self._pending_up.add(letter)
                 return False
-            ok = _send_key(virtual_key(letter), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
+            ok = _send_key(virtual_key(letter), KEYEVENTF_KEYUP)
             self._pressed.discard(letter)
             return ok
 
     def release_all(self) -> None:
         with self._lock:
             for letter in list(self._pressed):
-                _send_key(virtual_key(letter), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
+                _send_key(virtual_key(letter), KEYEVENTF_KEYUP)
             self._pressed.clear()
             self._pending_up.clear()
 
@@ -692,7 +724,7 @@ class ForegroundKeys:
                     letter = _letter(key)
                 except ValueError:
                     continue
-                _send_key(virtual_key(letter), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)
+                _send_key(virtual_key(letter), KEYEVENTF_KEYUP)
             self._pressed.clear()
 
     def keys_down(self) -> tuple[str, ...]:

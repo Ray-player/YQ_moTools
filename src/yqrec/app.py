@@ -121,6 +121,52 @@ def _fallback_candidates() -> list[Path]:
     return out
 
 
+def _has_records(path: Path) -> bool:
+    """这个目录里已经有"用户攒下来的东西"（标定档或设置）？"""
+    try:
+        return (path / "profiles" / "default.json").exists() or (path / "settings.json").exists()
+    except OSError:
+        return False
+
+
+def _sticky_data_dir(primary: Path, setting: str) -> tuple[str, str]:
+    """主目录**能写**时，别急着切过去：备选目录里已有存档就继续用它。
+
+    为什么需要（2026-10-29 提权后暴露）：数据目录的可写性会随**权限**翻转 ——
+    普通权限下 `%APPDATA%` 写不进去（安全软件按未信任程序拦），启动就降级到
+    `<exe>\\data`；一旦自提权成功、`%APPDATA%` 又变得可写，主目录就"赢"了，
+    用户看到的是**标定档没了、窗口大小和乐器回到默认**（其实数据还在旧目录里）。
+
+    规则很窄：主目录里**还没有**任何存档、而某个备选目录里**已经有**，才粘住旧目录。
+    主目录已有存档就照常以它为准（用户真搬过数据的那次不会被拽回来）。
+    """
+    if _has_records(primary):
+        return ("", "")
+    for candidate in _fallback_candidates():
+        if candidate == primary or not _has_records(candidate):
+            continue
+        if probe_writable_quiet(candidate):
+            os.environ["YQREC_DATA_DIR"] = str(candidate)
+            detail = (
+                f"配置 archive_path = {setting or '（未配置，默认 Temp）'}\n"
+                f"主目录：{primary}（这次能写了，但里面还没有存档）\n"
+                f"继续使用：{candidate}（这里有上次的标定档/设置）\n"
+                "（不想再用它，就把该目录里的 settings.json 与 profiles/ 删掉后重启）"
+            )
+            return ("沿用上次的存档目录（悬停看详情）", detail)
+    return ("", "")
+
+
+def probe_writable_quiet(path: Path) -> bool:
+    """`config.probe_writable()` 的布尔版（只为"能不能写"这一个判断）。"""
+    from yqrec.config import probe_writable
+
+    try:
+        return probe_writable(path) is None
+    except Exception:
+        return False
+
+
 def _ensure_writable_data_dir() -> tuple[str, str]:
     """开跑前先"真写一次"存档目录；写不进去就换一个能写的。
 
@@ -130,6 +176,7 @@ def _ensure_writable_data_dir() -> tuple[str, str]:
 
     降级顺序：配置的目录 → `Local`（`<exe>\\data`）→ `%LOCALAPPDATA%\\YQ_moTools`。
     即 "Temp 写不进去自动降级为 Local" 就是这里实现的（候选表第一项就是 Local）。
+    主目录这次**能写**但里面是空的、而备选目录已有存档时，继续用备选（见 `_sticky_data_dir`）。
     """
     from yqrec.config import archive_setting, data_dir, probe_writable
 
@@ -138,9 +185,9 @@ def _ensure_writable_data_dir() -> tuple[str, str]:
     except Exception as exc:
         return ("存档目录解析失败，本次不保存设置", f"data_dir() 抛错：{type(exc).__name__}: {exc}")
     error = probe_writable(primary)
-    if error is None:
-        return ("", "")
     setting = archive_setting()
+    if error is None:
+        return _sticky_data_dir(primary, setting)
     for candidate in _fallback_candidates():
         if candidate == primary:
             continue
@@ -165,13 +212,41 @@ def _ensure_writable_data_dir() -> tuple[str, str]:
     return ("存档目录不可写，本次不保存设置（悬停看详情）", detail)
 
 
+def _elevate_early(argv: list[str] | None) -> tuple[str, str]:
+    """启动第一步：需要的话把本进程换成**管理员实例**（见 `yqrec.elevate`）。
+
+    为什么不提权就没法给游戏发键：原神 PC 端以管理员权限运行（从启动器继承），
+    UIPI 会把普通权限进程注入的键鼠**静默丢弃** —— `SendInput` 返回成功但游戏没反应。
+    BetterGI 因此每次启动都 `Verb="runas"` 重启自己，这里抄同款做法。
+
+    拒绝 UAC / 提权失败都不阻断启动：录制识谱、试听、导出都不需要管理员。
+    """
+    from yqrec.elevate import ensure_admin
+
+    try:
+        return ensure_admin(argv)
+    except Exception as exc:  # 提权只是尽力而为，绝不能反过来挡住整个程序
+        _log.exception("自提权异常（继续以普通权限运行）")
+        return ("failed", f"自提权异常：{type(exc).__name__}: {exc}")
+
+
 def run_gui(argv: list[str] | None = None) -> int:
     """启动主窗，返回 Qt 事件循环退出码。"""
     enable_dpi_awareness()
     prepare_assets_path()
     _ensure_std_streams()
+    from yqrec.elevate import Elevation, status_text
+
+    admin_status, admin_note = _elevate_early(argv)
+    if admin_status == Elevation.RELAUNCHED:
+        # 高权限实例已经起来了，本进程什么都不做直接退出（否则会出现两个窗口）
+        return 0
     _detach_cwd()
     data_note, data_detail = _ensure_writable_data_dir()
+    if not data_note and admin_status in (Elevation.CANCELLED, Elevation.FAILED):
+        # 没有管理员权限时最要紧的不是写盘，而是"往游戏里注入的键会被系统丢弃"
+        data_note = "未获得管理员权限：向以管理员运行的游戏注入按键会失效"
+        data_detail = admin_note or "自提权未成功，请右键程序 → 以管理员身份运行"
     log_dir_text = ""
     log_failed = False
     try:
@@ -196,6 +271,7 @@ def run_gui(argv: list[str] | None = None) -> int:
 
     from yqrec.ui.main_window import MainWindow, instrument_icon
 
+    _log.info("权限状态: %s", status_text(admin_status, admin_note))
     app = QApplication(list(argv) if argv is not None else sys.argv)
     app.setApplicationName("YQ_moTools")
     app.setApplicationDisplayName("YQ_moTools")
@@ -212,6 +288,7 @@ def run_gui(argv: list[str] | None = None) -> int:
         log_dir_text=log_dir_text,
         note=data_note,
         detail=data_detail,
+        admin=status_text(admin_status, admin_note),
     )
     _run_injection_selftest(window)
     _log.info("GUI 启动完成")
@@ -247,6 +324,7 @@ def _report_paths(
     log_dir_text: str = "",
     note: str = "",
     detail: str = "",
+    admin: str = "",
 ) -> None:
     """启动自检：把路径写进日志；写不了就在窗口最下方的消息区说清楚（不弹窗）。
 
@@ -281,6 +359,7 @@ def _report_paths(
         ("乐器配置", click_text),
         ("工作目录", str(Path.cwd())),
         ("输入环境", env_text),
+        ("权限", admin or "-"),
     ]
     for label, path in rows:
         _log.info("路径[%s] = %s", label, path)
