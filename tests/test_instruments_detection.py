@@ -278,9 +278,19 @@ def test_key_play_delay_is_shared_by_all_instruments(tmp_path) -> None:
     assert len(load_instruments(path)) >= 6, "全局参数不该影响乐器解析"
 
 
-def test_key_play_entry_visible_default_off() -> None:
-    """M6h：「演奏」入口显隐是全局 int 开关，默认 0（隐藏）。"""
-    assert load_key_play_entry_visible() is False
+def test_key_play_entry_visible_default_off(tmp_path) -> None:
+    """M6h：「演奏」入口显隐是全局 int 开关，**没写就是关闭**。
+
+    注意别拿仓库的 `assets/instruments.json` 断言这条：实机测演奏期间那里是 `1`，
+    否则这条测试会随"当前产品开关状态"时红时绿。这里只验默认语义。
+    """
+    assert load_key_play_entry_visible(tmp_path / "nope.json") is False, "文件缺失 → 隐藏"
+
+    data = json.loads(ASSETS.read_text(encoding="utf-8"))
+    data.pop("key_play_entry_visible", None)
+    path = tmp_path / "instruments_no_key.json"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert load_key_play_entry_visible(path) is False, "缺项 → 隐藏"
 
 
 def test_key_play_entry_visible_reads_json(tmp_path) -> None:
@@ -305,3 +315,45 @@ def test_key_play_entry_visible_reads_json(tmp_path) -> None:
     path = tmp_path / "instruments_bad.json"
     path.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
     assert load_key_play_entry_visible(path) is False, "非法值不许把按钮亮出来"
+
+
+def test_key_play_channel_default_background() -> None:
+    """v1.51：注入通道由全局 int 参数 `key_play_channel` 决定，缺省 = 后台。"""
+    from yqrec.instruments import (
+        DEFAULT_KEY_PLAY_CHANNEL,
+        KEY_PLAY_CHANNEL_BACKGROUND,
+        load_key_play_channel,
+    )
+
+    assert DEFAULT_KEY_PLAY_CHANNEL == KEY_PLAY_CHANNEL_BACKGROUND == "background"
+    assert load_key_play_channel() == KEY_PLAY_CHANNEL_BACKGROUND, "仓库自带配置是 0=后台"
+
+
+def test_key_play_channel_reads_json(tmp_path) -> None:
+    """0 = 后台 / 1 = 前台；缺项、非整数、越界一律回落后台（绝不抛）。"""
+    from yqrec.instruments import KEY_PLAY_CHANNEL_BACKGROUND, KEY_PLAY_CHANNEL_FOREGROUND
+    from yqrec.instruments import load_key_play_channel
+
+    data = json.loads(ASSETS.read_text(encoding="utf-8"))
+    cases = (
+        (0, KEY_PLAY_CHANNEL_BACKGROUND),
+        (1, KEY_PLAY_CHANNEL_FOREGROUND),
+        ("1", KEY_PLAY_CHANNEL_FOREGROUND),
+        ("0", KEY_PLAY_CHANNEL_BACKGROUND),
+        (7, KEY_PLAY_CHANNEL_BACKGROUND),
+        ("abc", KEY_PLAY_CHANNEL_BACKGROUND),
+        (None, KEY_PLAY_CHANNEL_BACKGROUND),
+    )
+    # 每个用例独立文件：`_read_json` 按 (mtime, size) 缓存，同尺寸内容可能被判成没变
+    for index, (raw, expected) in enumerate(cases):
+        payload = dict(data)
+        if raw is None:
+            payload.pop("key_play_channel", None)
+        else:
+            payload["key_play_channel"] = raw
+        path = tmp_path / f"channel_{index}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        assert load_key_play_channel(path) == expected, (raw, expected)
+
+    missing = tmp_path / "channel_missing.json"
+    assert load_key_play_channel(missing) == KEY_PLAY_CHANNEL_BACKGROUND, "读不到文件也不抛"

@@ -70,9 +70,12 @@ from ..config import (
 )
 from ..formats import bgi_sheet
 from ..instruments import (
+    DEFAULT_KEY_PLAY_CHANNEL,
+    KEY_PLAY_CHANNEL_BACKGROUND,
     assets_dir,
     instruments_mtime,
     load_instruments,
+    load_key_play_channel,
     load_key_play_delay_ms,
     load_key_play_entry_visible,
     load_record_click,
@@ -281,6 +284,13 @@ class MainWindow(QMainWindow):
         """
         self._key_sink: inputsim.ForegroundKeys | inputsim.BackgroundKeys | None = None
         """按键演奏的注入通道（前台 SendInput / 后台 PostMessage）；音频模式恒为 None。"""
+        self._key_play_channel = DEFAULT_KEY_PLAY_CHANNEL
+        """当前注入通道（`background` / `foreground`），来自 `assets/instruments.json`
+        的**全局参数** `key_play_channel`（int：0=后台 默认 / 1=前台）。
+
+        v1.51 起界面上不再有「前台/后台」胶囊：这个值也不进 `settings.json`（C 盘存档），
+        只在启动与 F5 / 配置重读时从 JSON 读一次（`_sync_key_play_entry()`）。
+        """
         self._key_interrupted = False
         """演奏刚被"注入不下去"打断（M6c）：用来区分**中断**与**自然播完** —— 两者都是
         `idle`，但中断要停在暂停态等用户切回窗口，只有真播完才退出演奏模式。"""
@@ -347,7 +357,6 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._restore_ui_options()
-        self._sync_key_mode_button()  # 入口胶囊按落盘的 ui.key_play_mode 显示初值
         self._restore_window_size()
         self._apply_theme(self._theme)
         self._apply_on_top_state(self._config.ui.always_on_top)
@@ -369,7 +378,7 @@ class MainWindow(QMainWindow):
         if not config_path().exists() or needs_migration():
             # 第二个条件（M6c）：迁移只改内存，而 `AppConfig.version` 读出来已是新版本号 ——
             # 不在这里落盘的话文件永远停在旧 version，**每次启动都重迁一遍**，
-            # 把用户手选的 `ui.key_play_mode` / theme / backend 反复拽回新默认值。
+            # 把用户手选的 theme / backend 反复拽回新默认值；旧版还可能残留已废弃的 ui 键。
             self._save_app_config()
         # M2q.2：不再定时轮询 instruments.json —— 只在启动、「开始预览」「学基线」和 F5 时按需重读
         self._shortcut_reload = QShortcut(QKeySequence("F5"), self)
@@ -618,21 +627,6 @@ class MainWindow(QMainWindow):
         self._reset_status_text()
         self._refresh_save_tooltip()
 
-    def _make_key_mode_button(self) -> QPushButton:
-        """前台/后台 注入通道胶囊（**只放在演奏控制条里**，M6e 按用户要求去掉入口处那个）。
-
-        `checkable` + `#KeyMode:checked` = "激活效果"（与 16:9 那个开关同一套观感）；
-        checked 语义固定为 **前台**：前台是 SendInput、需要窗口在最前，属于"更强的约束"，
-        用激活态把这件事显性化；后台是常态（默认值）。
-        """
-        button = QPushButton("前台")
-        button.setObjectName("KeyMode")
-        button.setCheckable(True)
-        button.setFixedSize(42, 22)
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        return button
-
     def _tool_button(self, text: str, role: str, *, width: int) -> QPushButton:
         """工具栏按钮：统一高度 + 档位 objectName（`Secondary`/`Quiet`/`Primary`/`Danger`）。"""
         button = QPushButton(text)
@@ -717,13 +711,15 @@ class MainWindow(QMainWindow):
         self._btn_play_keys.setEnabled(False)
         self._btn_play_keys.setToolTip(
             "把谱面模拟成键盘按键打到游戏窗口（游戏自己发声）\n"
-            "前台 = SendInput，游戏窗口必须在最前；后台 = PostMessage，不抢焦点"
+            "注入通道由 instruments.json 的 key_play_channel 决定（0=后台 / 1=前台）"
         )
         self._btn_play_keys.clicked.connect(self._toggle_key_play)
         # 是否露出来由 `assets/instruments.json` 的 `key_play_entry_visible` 定（0=隐藏/1=显示）：
         # 布局会跳过隐藏控件，所以隐藏时不留空位，底栏看起来和没这个功能一样。
         self._key_play_entry_visible = self._read_key_play_entry_visible()
         self._btn_play_keys.setVisible(self._key_play_entry_visible)
+        # 注入通道同样是 JSON 全局参数（v1.51 起没有胶囊可点，只按配置走）
+        self._key_play_channel = self._read_key_play_channel()
 
         # 试听控制条（M2q.9）：进入试听模式后**原地替换**「试听」按钮
         self._play_bar = QWidget()
@@ -749,15 +745,10 @@ class MainWindow(QMainWindow):
         self._btn_play_stop.setObjectName("MediaStop")
         self._btn_play_stop.setToolTip("停止试听并回到「试听」入口")
         self._btn_play_stop.clicked.connect(self._stop_playback)
-        # 注入通道开关（只在按键演奏时出现）：前台 SendInput ⇄ 后台 PostMessage。
-        # M6e 起**只有这一处**（入口那个预选胶囊按用户要求删掉了）：通道偏好存在
-        # `ui.key_play_mode` 里，进了演奏再切即可（切换会从当前位置重启）。
-        self._btn_key_mode = self._make_key_mode_button()
-        self._btn_key_mode.clicked.connect(self._switch_key_mode)
-        self._btn_key_mode.hide()
+        # v1.51：注入通道不再有「前台/后台」胶囊（用户要求去掉），改由
+        # `assets/instruments.json` 的全局参数 `key_play_channel` 决定，演奏中不可切换。
         for widget in (self._btn_rewind, self._btn_toggle_play, self._btn_forward):
             play_bar.addWidget(widget)
-        play_bar.addWidget(self._btn_key_mode)
         play_bar.addWidget(VLine(self))
         play_bar.addWidget(self._btn_play_stop)
         self._btn_rewind.clicked.connect(lambda: self._step_cursor(-1))
@@ -2501,14 +2492,14 @@ class MainWindow(QMainWindow):
         self._btn_load_score.setEnabled(not self._recording)
         if ready:
             self._btn_play.setToolTip("从头试听谱面（预览需处于停止状态）")
-            mode = str(self._config.ui.key_play_mode or "background").lower()
             self._btn_play_keys.setToolTip(
                 "把谱面模拟成键盘按键发给游戏（游戏自己发声）\n"
                 + (
                     "当前：后台 PostMessage（不用切窗口，边弹边操作本程序）"
-                    if mode == inputsim.BackgroundKeys.mode
+                    if self._key_play_channel == KEY_PLAY_CHANNEL_BACKGROUND
                     else "当前：前台 SendInput（发给当前激活窗口；本程序在前台时不发键、不暂停）"
                 )
+                + "\n（通道由 instruments.json 的 key_play_channel 决定：0=后台 / 1=前台）"
             )
         elif self._worker is not None:
             self._btn_play.setToolTip("先点「停止预览」关闭预览，才能试听")
@@ -2675,8 +2666,6 @@ class MainWindow(QMainWindow):
         self._btn_play.hide()
         self._btn_play_keys.hide()
         self._play_bar.show()
-        self._btn_key_mode.setVisible(self._play_kind == "keys")
-        self._sync_key_mode_button()
         self._play_spacer.changeSize(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
         self._actions_row.invalidate()  # 让出留白给进度条
         self._highlight_at(self._cursor)
@@ -2725,7 +2714,6 @@ class MainWindow(QMainWindow):
         self._play_spacer.changeSize(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._actions_row.invalidate()
         self._play_bar.hide()
-        self._btn_key_mode.hide()
         # 退出时按 JSON 开关还原（别写死 show()，否则隐藏的入口会自己冒出来）
         self._btn_play_keys.setVisible(self._key_play_entry_visible)
         self._btn_play.show()
@@ -2769,7 +2757,10 @@ class MainWindow(QMainWindow):
             self._last_external_hwnd = int(hwnd)
 
     def _make_key_sink(self) -> inputsim.ForegroundKeys | inputsim.BackgroundKeys | None:
-        """按当前设置造注入通道；条件不满足时提示并返回 None。
+        """按全局配置造注入通道；条件不满足时提示并返回 None。
+
+        通道来自 `assets/instruments.json` 的 `key_play_channel`（0=后台 默认 / 1=前台，
+        见 `_read_key_play_channel()`），v1.51 起界面上没有可点的切换入口。
 
         两种通道对"目标窗口"的依赖完全不同（M6d）：
 
@@ -2777,7 +2768,7 @@ class MainWindow(QMainWindow):
           所以窗口句柄为 0 也照常起播（不强制先框选 / 先切窗口）；
         - **后台**：`PostMessage` 必须有个活着的窗口，取不到就只能报错。
         """
-        mode = str(self._config.ui.key_play_mode or "background").lower()
+        mode = self._key_play_channel
         hwnd = self._key_target_hwnd()
         if mode == inputsim.BackgroundKeys.mode:
             if not hwnd or not inputsim.is_window(hwnd):
@@ -2811,71 +2802,25 @@ class MainWindow(QMainWindow):
         self._set_error("目标窗口已关闭（后台投递需要窗口还在）—— 重开窗口后再点播放")
         return False
 
-    def _sync_key_mode_button(self) -> None:
-        """刷新演奏控制条里的「前台/后台」胶囊（M6e 起**只有这一处**）。
+    def _read_key_play_channel(self) -> str:
+        """读注入通道（全局参数 `key_play_channel`：0=后台 默认 / 1=前台）。
 
-        `ui.key_play_mode` 是唯一真相：文字 + 勾选（前台=激活态）+ 说明一次刷完。
+        每次起播前现读一次也便宜（`instruments._read_json` 带 (mtime,size) 缓存），
+        但这里只在启动 / F5 / 配置重读时刷新到 `_key_play_channel`，演奏途中不换通道 ——
+        换通道意味着重建整条时间轴，而 v1.51 起用户没有可点的入口了。
         """
-        mode = str(self._config.ui.key_play_mode or "background").lower()
-        background = mode == inputsim.BackgroundKeys.mode
-        self._btn_key_mode.setText("后台" if background else "前台")
-        self._btn_key_mode.setChecked(not background)
-        self._btn_key_mode.setToolTip(
-            (
-                "当前：后台 PostMessage（不用切窗口）\n"
-                "· 按键投给游戏窗口，本程序可以一直在前面操作\n"
-                "· 只对读窗口消息的程序有效，走 RawInput 的游戏可能没反应\n"
-                "点一下切到「前台 SendInput」（从当前位置继续）"
-            )
-            if background
-            else (
-                "当前：前台 SendInput（发给当前激活窗口）\n"
-                "· 激活的是本程序时**不发键、也不暂停**，切到游戏后接着弹\n"
-                "· 不抢焦点：点一下游戏窗口就行\n"
-                "点一下切到「后台 PostMessage」（从当前位置继续）"
-            )
-        )
+        try:
+            channel = load_key_play_channel()
+        except Exception as exc:  # 配置读不到 → 按默认后台，别把演奏拦下来
+            _log.warning("读取 key_play_channel 失败（%s），按后台处理", exc)
+            return DEFAULT_KEY_PLAY_CHANNEL
+        return channel or DEFAULT_KEY_PLAY_CHANNEL
 
-    def _switch_key_mode(self) -> None:
-        """前台 ⇄ 后台：换通道并从当前播放头继续（原本暂停就留在暂停态）。"""
-        if not self._play_mode or self._play_kind != "keys":
-            self._sync_key_mode_button()
-            return
-        background = (
-            str(self._config.ui.key_play_mode or "background").lower()
-            == inputsim.BackgroundKeys.mode
-        )
-        head = self._playhead_ms()
-        ordinal = self._playback.ordinal_at(head)
-        was_playing = not self._paused
-        self._config.ui.key_play_mode = "foreground" if background else "background"
-        self._save_app_config()
-        self._cancel_key_delay()  # 换通道就不再等之前那次倒计时
-        self._playback.stop(emit_state=False)  # 换通道前先停（顺带松开所有键）
-        sink = self._make_key_sink()
-        if sink is None:  # 新通道用不了（例如后台要窗口但游戏已关）→ 回退并停播
-            self._config.ui.key_play_mode = "background" if background else "foreground"
-            self._save_app_config()
-            self._sync_key_mode_button()
-            self._stop_playback()
-            return
-        self._key_sink = sink
-        self._playback.set_sink(sink)
-        self._sync_key_mode_button()
-        self._cursor = ordinal
-        self._parked_ms = head
-        # 后台窗口没了就退成"暂停态"（不退出模式）；前台恒可继续
-        was_playing = was_playing and self._can_inject_now()
-        if not self._playback.play_from(ordinal):
-            self._stop_playback()
-            return
-        self._paused = not was_playing
-        if self._paused:
-            self._playback.pause()
-            self._parked_ms = head
-        self._sync_play_buttons()
-        self._sync_progress()
-        self._flash_status(f"已切到{sink.describe()}")
+    def _channel_label(self, channel: str) -> str:
+        """通道的中文说法（只用于提示文案）。"""
+        if channel == KEY_PLAY_CHANNEL_BACKGROUND:
+            return "后台 PostMessage"
+        return "前台 SendInput"
 
     def _on_key_interrupted(self, reason: str) -> None:
         """演奏线程报告"彻底投不出去了"（后台目标窗口关闭）→ **停在暂停态**，不退出模式。
@@ -3078,20 +3023,30 @@ class MainWindow(QMainWindow):
             return False
 
     def _sync_key_play_entry(self) -> None:
-        """按 JSON 刷新「演奏」入口的显隐（F5 / 配置重读 / 启动各一次）。
+        """按 JSON 刷新「演奏」入口的显隐与注入通道（F5 / 配置重读 / 启动各一次）。
 
         演奏进行中不动按钮：那时入口本来就该藏起来，由控制条占位；退出演奏时
         `_exit_play_mode()` 会用同一个字段还原，所以这里只管"不忙的时候"。
+        通道（`key_play_channel`）同理 —— 演奏途中改 JSON 只记下来，
+        下一次点「演奏」才生效（换通道要重建时间轴，不做热切）。
         """
         if not hasattr(self, "_btn_play_keys"):  # 还没建界面（极少见，防御一下）
             return
         self._key_play_entry_visible = self._read_key_play_entry_visible()
+        previous = self._key_play_channel
+        self._key_play_channel = self._read_key_play_channel()
+        if previous != self._key_play_channel:
+            label = self._channel_label(self._key_play_channel)
+            _log.info("注入通道已改为 %s（下次点「演奏」生效）", label)
+            if self._play_mode and self._play_kind == "keys":
+                self._flash_status(f"注入通道已改为 {label}（本次演奏不变，下次生效）")
         if self._play_mode:
             return
         changed = self._btn_play_keys.isVisibleTo(self) != self._key_play_entry_visible
         self._btn_play_keys.setVisible(self._key_play_entry_visible)
         if changed:  # 显隐会改变这一行的宽度，让布局立刻重算，别等下一次 resize
             self._actions_row.invalidate()
+        self._refresh_playback_enabled()  # 入口 tooltip 里写着当前通道
 
     def _schedule_key_start(self, play: Callable[[], None]) -> bool:
         """起播/继续前先倒计时；返回 `True` 表示"正在倒计时，先别起播"。

@@ -379,6 +379,47 @@ def load_key_play_entry_visible(path: Path | str | None = None) -> bool:
     return value != 0
 
 
+KEY_PLAY_CHANNEL_BACKGROUND = "background"
+KEY_PLAY_CHANNEL_FOREGROUND = "foreground"
+"""按键演奏的注入通道取值（与 `inputsim.BackgroundKeys.mode` / `ForegroundKeys.mode` 同字面）。"""
+
+DEFAULT_KEY_PLAY_CHANNEL = KEY_PLAY_CHANNEL_BACKGROUND
+"""全局默认通道 = **后台**（PostMessage）：不用切窗口、不抢焦点。"""
+
+
+def load_key_play_channel(path: Path | str | None = None) -> str:
+    """加载**全局**注入通道 `key_play_channel`（int，所有乐器共用）。
+
+    | 值 | 通道 | 含义 |
+    |---|---|---|
+    | ``0`` | `background`（**默认**） | `PostMessage` 投给目标窗口，不抢焦点 |
+    | ``1`` | `foreground` | `SendInput` 扫描码，打给当前激活窗口 |
+
+    缺省 / 非整数 / 越界一律回落 ``0``（后台）并记 warning，绝不抛 ——
+    这个参数只决定"往哪儿发键"，读坏了大不了退回默认通道，不该拦下演奏。
+    """
+    p = Path(path) if path else instruments_path()
+    try:
+        data = _read_json(p)
+    except (OSError, ValueError) as exc:
+        _log.warning(
+            "读取 key_play_channel 失败（%s），按默认 %s 处理", exc, DEFAULT_KEY_PLAY_CHANNEL
+        )
+        return DEFAULT_KEY_PLAY_CHANNEL
+    raw = data.get("key_play_channel")
+    if raw is None:
+        return DEFAULT_KEY_PLAY_CHANNEL
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        _log.warning("key_play_channel=%r 不是整数，按后台处理", raw)
+        return DEFAULT_KEY_PLAY_CHANNEL
+    if value not in (0, 1):
+        _log.warning("key_play_channel=%s 只认 0（后台）/ 1（前台），按后台处理", value)
+        return DEFAULT_KEY_PLAY_CHANNEL
+    return KEY_PLAY_CHANNEL_FOREGROUND if value else KEY_PLAY_CHANNEL_BACKGROUND
+
+
 def load_instruments(path: Path | str | None = None) -> dict[str, InstrumentSpec]:
     """加载乐器表，返回 `{id: InstrumentSpec}`（**插入顺序 = JSON 顺序 = 下拉顺序**）。"""
     p = Path(path) if path else instruments_path()

@@ -106,7 +106,7 @@ YQRec/
 - **截图**：`j-HDR`（默认，HDR 屏唯一颜色正确的路径）/ DXGI / GDI 三档，回退链 `hdr → dxgi → gdi`，回退必提示
 - **录制识别**：逐键基线 + weighted 判据；录制启动可选输入注入（`record_click`：0=关 / 1=激活目标窗口+模拟空格 / 2=模拟鼠标点击），启动自动注入自检，日志写明注入目标与输入环境
 - **试听**：播放器式控制条（播放/暂停/快进快退 + 进度条拖动跳转）；试听刚录的谱面时键位灯随录制实况点亮（按下/弹起/按下时 Δ）
-- **按键演奏**：谱面直接按键注入游戏——前台 SendInput（扫描码）/ 后台 PostMessage 双通道（播放条胶囊切换，默认后台），起播/续播延迟全局可配（`key_play_delay_ms`，默认 3s 倒计时）；被挡逐拍跳过不中断、回焦补发抬起（M6 待实机验证）
+- **按键演奏**：谱面直接按键注入游戏——前台 SendInput（扫描码）/ 后台 PostMessage 双通道，通道由 `instruments.json` 的全局参数 `key_play_channel`（int：0=后台 默认 / 1=前台）决定，界面无切换按钮；起播/续播延迟全局可配（`key_play_delay_ms`，默认 3s 倒计时）；被挡逐拍跳过不中断、回焦补发抬起（M6 待实机验证）
 - **读谱（v0.1.6 修复）**：读入 BetterGI midi / yuanqin 谱面时，tick 文本按谱面所标乐器自动裁剪延音——无延音乐器不再带 `A[ms]` 标记（此前无论乐器一律带延音）；未标乐器按风物之诗处理
 - **导出**：tick（默认，支持延音 `A[ms]`，JSON 含 `type` / `Average_Delta` / `Min_Delta` 统计）/ BetterGI midi / BetterGI yuanqin 三种，互转往返误差 ≤0.5ms；`tools/compare_sheets.py` 可做谱面互校；曲谱语法速查见 [docs/04](docs/04-tick格式曲谱规则.md)
 - **乐器**：6 乐器参数内置（风物之诗/谐律键琴/镜花之琴/老旧的诗琴实机可用；悠可琴/余音暂为仅预览），改 `instruments.json` 后 F5 热重载

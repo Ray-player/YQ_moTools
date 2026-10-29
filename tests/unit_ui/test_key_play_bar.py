@@ -77,32 +77,46 @@ def test_entry_sits_left_of_preview(window) -> None:
     order = [row.itemAt(i).widget() for i in range(row.count()) if row.itemAt(i).widget()]
     assert order.index(win._btn_play_keys) < order.index(win._btn_play), "「演奏」在「试听」左侧"
     assert not hasattr(win, "_btn_key_mode_entry"), "M6e：入口处的通道胶囊已删除"
+    assert not hasattr(win, "_btn_key_mode"), "v1.51：控制条里的前后台胶囊也删掉了"
     win.close()
 
 
-def test_mode_button_lives_in_play_bar(window, monkeypatch: pytest.MonkeyPatch) -> None:
-    """通道胶囊只在演奏控制条里：点一下就切并落盘（不做入口预选）。"""
+def test_channel_comes_from_json_param(window, monkeypatch: pytest.MonkeyPatch) -> None:
+    """注入通道由 `instruments.json` 的全局参数 `key_play_channel` 决定（int，0=后台）。"""
+    from yqrec.instruments import (
+        KEY_PLAY_CHANNEL_BACKGROUND,
+        KEY_PLAY_CHANNEL_FOREGROUND,
+    )
+    from yqrec.ui import main_window as mw
+
     win, app = window
-    saved: list[int] = []
-    monkeypatch.setattr(win, "_save_app_config", lambda: saved.append(1))
-    monkeypatch.setattr(win, "_make_key_sink", lambda: RecordingSink())
+    assert win._key_play_channel == KEY_PLAY_CHANNEL_BACKGROUND, "默认后台"
 
-    assert win._config.ui.key_play_mode == "background", "默认后台（M6c）"
-    assert win._btn_key_mode.text() == "后台"
-    assert win._btn_key_mode.isChecked() is False, "后台不是激活态"
-    assert win._btn_key_mode.isVisibleTo(win) is False, "没进演奏时不显示"
-
-    win._btn_play_keys.click()
+    monkeypatch.setattr(mw, "load_key_play_channel", lambda: KEY_PLAY_CHANNEL_FOREGROUND)
+    win._sync_key_play_entry()  # 等价于按 F5
     app.processEvents()
-    assert win._btn_key_mode.isVisibleTo(win) is True
+    assert win._key_play_channel == KEY_PLAY_CHANNEL_FOREGROUND, "填 1 后按 F5 即生效"
+    assert "前台 SendInput" in win._btn_play_keys.toolTip(), win._btn_play_keys.toolTip()
 
-    win._btn_key_mode.click()
-    app.processEvents()
-    assert win._config.ui.key_play_mode == "foreground"
-    assert win._btn_key_mode.text() == "前台"
-    assert win._btn_key_mode.isChecked() is True, "前台 = 按键激活效果"
-    assert saved, "选择要落盘，下次启动沿用"
-    win._stop_playback()
+    monkeypatch.setattr(mw, "load_key_play_channel", lambda: KEY_PLAY_CHANNEL_BACKGROUND)
+    win._sync_key_play_entry()
+    assert win._key_play_channel == KEY_PLAY_CHANNEL_BACKGROUND
+    assert "后台 PostMessage" in win._btn_play_keys.toolTip()
+    win.close()
+
+
+def test_channel_reader_falls_back_to_background(window, monkeypatch: pytest.MonkeyPatch) -> None:
+    """配置读不到/读坏时回落后台，绝不因此拦下演奏。"""
+    from yqrec.instruments import KEY_PLAY_CHANNEL_BACKGROUND
+    from yqrec.ui import main_window as mw
+
+    win, _app = window
+
+    def boom() -> str:
+        raise OSError("json 读不到")
+
+    monkeypatch.setattr(mw, "load_key_play_channel", boom)
+    assert win._read_key_play_channel() == KEY_PLAY_CHANNEL_BACKGROUND
     win.close()
 
 
@@ -147,7 +161,7 @@ def test_foreground_mode_never_steals_focus(window, monkeypatch: pytest.MonkeyPa
     from yqrec import inputsim
 
     win, app = window
-    win._config.ui.key_play_mode = "foreground"
+    win._key_play_channel = "foreground"
     sink = inputsim.ForegroundKeys(0x1234)
     win._key_sink = sink
     calls: list[int] = []
@@ -170,12 +184,12 @@ def test_foreground_mode_requires_no_target_window(window, monkeypatch) -> None:
     from yqrec import inputsim
 
     win, app = window
-    win._config.ui.key_play_mode = "foreground"
+    win._key_play_channel = "foreground"
     monkeypatch.setattr(win, "_key_target_hwnd", lambda: 0)
     sink = win._make_key_sink()
     assert isinstance(sink, inputsim.ForegroundKeys), "前台不该因为没目标就报错"
 
-    win._config.ui.key_play_mode = "background"
+    win._key_play_channel = "background"
     assert win._make_key_sink() is None, "后台没目标窗口时确实投不出去 → 报错"
     win.close()
 
@@ -187,7 +201,7 @@ def test_start_playback_keeps_playing_when_own_window_active(
     from yqrec import inputsim
 
     win, app = window
-    win._config.ui.key_play_mode = "foreground"
+    win._key_play_channel = "foreground"
     monkeypatch.setattr(win, "_make_key_sink", lambda: inputsim.ForegroundKeys(0x1234))
     monkeypatch.setattr(inputsim, "foreground_window", lambda: int(win.winId()))
     monkeypatch.setattr(inputsim, "is_own_window", lambda h: True)
@@ -207,7 +221,7 @@ def test_resume_does_not_need_rearm(window, monkeypatch: pytest.MonkeyPatch) -> 
     from yqrec import inputsim
 
     win, app = window
-    win._config.ui.key_play_mode = "foreground"
+    win._key_play_channel = "foreground"
     win._key_sink = inputsim.ForegroundKeys(0x1234)
     monkeypatch.setattr(inputsim, "foreground_window", lambda: int(win.winId()))
     monkeypatch.setattr(inputsim, "is_own_window", lambda h: True)
@@ -223,22 +237,35 @@ def test_resume_does_not_need_rearm(window, monkeypatch: pytest.MonkeyPatch) -> 
     win.close()
 
 
-def test_entry_mode_uses_background_sink(window, monkeypatch: pytest.MonkeyPatch) -> None:
-    """选了后台，点「演奏」就造后台通道（不经过前台抢焦点那条路）。"""
+def test_entry_uses_json_channel_sink(window, monkeypatch: pytest.MonkeyPatch) -> None:
+    """JSON 填 0（后台）时，点「演奏」就造后台通道；填 1 则走前台。"""
+    from yqrec.instruments import (
+        KEY_PLAY_CHANNEL_BACKGROUND,
+        KEY_PLAY_CHANNEL_FOREGROUND,
+    )
+    from yqrec.ui import main_window as mw
+
     win, app = window
-    win._config.ui.key_play_mode = "background"
-    win._sync_key_mode_button()
     made: list[str] = []
 
     def fake_sink():
-        made.append(win._config.ui.key_play_mode)
+        made.append(win._key_play_channel)
         return RecordingSink()
 
     monkeypatch.setattr(win, "_make_key_sink", fake_sink)
+    monkeypatch.setattr(mw, "load_key_play_channel", lambda: KEY_PLAY_CHANNEL_BACKGROUND)
+    win._sync_key_play_entry()
     win._btn_play_keys.click()
     app.processEvents()
-    assert made == ["background"]
+    assert made == [KEY_PLAY_CHANNEL_BACKGROUND]
     assert win._play_kind == "keys"
+    win._stop_playback()
+
+    monkeypatch.setattr(mw, "load_key_play_channel", lambda: KEY_PLAY_CHANNEL_FOREGROUND)
+    win._sync_key_play_entry()
+    win._btn_play_keys.click()
+    app.processEvents()
+    assert made == [KEY_PLAY_CHANNEL_BACKGROUND, KEY_PLAY_CHANNEL_FOREGROUND]
     win._stop_playback()
     win.close()
 
@@ -264,7 +291,6 @@ def test_click_swaps_entry_for_play_bar(window, monkeypatch: pytest.MonkeyPatch)
     assert win._play_bar.isVisibleTo(win) is True
     assert win._btn_play.isVisibleTo(win) is False
     assert win._btn_play_keys.isVisibleTo(win) is False
-    assert win._btn_key_mode.isVisibleTo(win) is True, "演奏时才有注入通道开关"
     played = [c for c in win.calls if c[0] in ("play_from", "resume")]
     assert played, "进入演奏必须真的开始播（延迟为 0 时立刻开始）"
     win.close()
@@ -285,17 +311,17 @@ def test_stop_returns_to_both_entries(window, monkeypatch: pytest.MonkeyPatch) -
     assert win._btn_play.isVisibleTo(win) is True
     # 入口是否露出来由 instruments.json 的 key_play_entry_visible 决定（当前默认 0=隐藏）
     assert win._btn_play_keys.isVisibleTo(win) is win._key_play_entry_visible
-    assert win._btn_key_mode.isVisibleTo(win) is False
     assert sink.events[-1] == ("release", ""), "退出时兜底松开所有键"
     win.close()
 
 
-def test_audio_mode_keeps_mode_switch_hidden(window) -> None:
+def test_audio_mode_has_no_channel_switch(window) -> None:
+    """试听不需要注入通道，控制条里也没有任何通道控件（v1.51 后彻底没有）。"""
     win, app = window
-    win._toggle_playback()  # 试听：控制条里不该出现通道开关
+    win._toggle_playback()
     app.processEvents()
     assert win._play_kind == "audio"
-    assert win._btn_key_mode.isVisibleTo(win) is False
+    assert not hasattr(win, "_btn_key_mode")
     win.close()
 
 
@@ -407,12 +433,18 @@ def test_start_delay_reads_global_param(window, monkeypatch) -> None:
     win.close()
 
 
-def test_entry_visibility_follows_json_switch(window, monkeypatch) -> None:
-    """M6h：入口显隐由 `instruments.json` 的 `key_play_entry_visible` 控制（0=隐藏 1=显示）。"""
+def test_entry_visibility_follows_json_switch(window, monkeypatch: pytest.MonkeyPatch) -> None:
+    """M6h：入口显隐由 `instruments.json` 的 `key_play_entry_visible` 控制（0=隐藏 1=显示）。
+
+    不假设仓库里的当前值（实机测演奏期间是 1）：显式从"关"开始，再往返一次。
+    """
     from yqrec.ui import main_window as mw
 
     win, app = window
-    assert win._btn_play_keys.isVisibleTo(win) is False, "默认 0 → 隐藏"
+    monkeypatch.setattr(mw, "load_key_play_entry_visible", lambda: False)
+    win._sync_key_play_entry()
+    app.processEvents()
+    assert win._btn_play_keys.isVisibleTo(win) is False, "填 0 → 隐藏"
 
     monkeypatch.setattr(mw, "load_key_play_entry_visible", lambda: True)
     win._sync_key_play_entry()

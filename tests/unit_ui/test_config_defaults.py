@@ -153,45 +153,33 @@ def test_default_theme_is_light(tmp_path: Path) -> None:
     assert cfg.ui.theme == "light"
 
 
+def test_key_play_mode_no_longer_stored(tmp_path: Path) -> None:
+    """v1.51：注入通道搬到 `instruments.json` 的全局参数，不再进 C 盘设置。
 
-def test_default_key_play_mode_is_background() -> None:
-    """M6c：按键演奏默认**后台**（不用先切窗口、不抢焦点）。"""
-    assert default_config().ui.key_play_mode == "background"
-    assert load_config(Path("不存在.json")).ui.key_play_mode == "background"
+    `UiConfig` 里没有这个字段了；老档（v5 及以前）里的残留值必须在迁移时摘掉，
+    否则改档的人会以为它还在生效（实际已无人读取）。
+    """
+    assert not hasattr(default_config().ui, "key_play_mode")
 
-
-def test_v4_key_play_mode_migrated_to_background(tmp_path: Path) -> None:
-    """v5 之前的 `"foreground"` 是 v1.45 的默认值被序列化，不是用户选择 → 按版本号对齐。"""
     p = tmp_path / "settings.json"
     p.write_text(
-        json.dumps({"version": 4, "ui": {"key_play_mode": "foreground", "theme": "dark"}}),
+        json.dumps({"version": 5, "ui": {"key_play_mode": "foreground", "theme": "dark"}}),
         encoding="utf-8",
     )
     cfg = load_config(p)
-    assert cfg.ui.key_play_mode == "background"
-    assert cfg.ui.theme == "dark", "只迁这一项，别的用户配置别乱动"
     assert cfg.version == CONFIG_VERSION
-
-
-def test_v5_key_play_mode_choice_is_kept(tmp_path: Path) -> None:
-    """v5 起这个字段才是真实选择：用户点成前台就必须原样读回，并被落盘保存。"""
-    p = tmp_path / "settings.json"
-    p.write_text(
-        json.dumps({"version": 5, "ui": {"key_play_mode": "foreground"}}), encoding="utf-8"
-    )
-    cfg = load_config(p)
-    assert cfg.ui.key_play_mode == "foreground"
+    assert cfg.ui.theme == "dark", "只清这一项，别的用户配置别乱动"
 
     save_config(cfg, p)
     saved = json.loads(p.read_text(encoding="utf-8"))
-    assert saved["ui"]["key_play_mode"] == "foreground", "前后台状态必须在存档里"
+    assert "key_play_mode" not in saved["ui"], "旧键必须被迁移摘掉"
 
 
 def test_main_window_writes_back_migrated_version(tmp_path: Path, monkeypatch) -> None:
     """迁移只改内存 → 主窗构造时要把新 version 落盘。
 
     不落盘的后果（M6c 实测）：文件一直是旧 version，**每次启动都重新迁移一遍**，
-    用户手动点成"前台"后重启又被拽回"后台"，看起来像"设置根本存不住"。
+    用户手选的 theme / backend 被反复拽回默认值，看起来像"设置根本存不住"。
     """
     from yqrec import config as config_mod
 
@@ -200,7 +188,8 @@ def test_main_window_writes_back_migrated_version(tmp_path: Path, monkeypatch) -
     p = config_mod.config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
-        json.dumps({"version": 4, "ui": {"key_play_mode": "foreground"}}), encoding="utf-8"
+        json.dumps({"version": 4, "ui": {"key_play_mode": "foreground", "theme": "dark"}}),
+        encoding="utf-8",
     )
 
     from PySide6.QtWidgets import QApplication
@@ -212,5 +201,5 @@ def test_main_window_writes_back_migrated_version(tmp_path: Path, monkeypatch) -
     # 必须在 close 之前查：closeEvent 自己也会落盘，会把"构造期就写回"这件事测没了
     saved = json.loads(p.read_text(encoding="utf-8"))
     assert saved["version"] == CONFIG_VERSION
-    assert saved["ui"]["key_play_mode"] == "background"
+    assert "key_play_mode" not in saved["ui"], "废弃键不该被写回存档"
     win.close()

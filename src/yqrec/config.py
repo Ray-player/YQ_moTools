@@ -11,7 +11,7 @@ from typing import Any
 from .logging import get_logger
 from .types import CaptureTarget, KeyGrid, KeyThreshold, Profile, target_from_dict
 
-CONFIG_VERSION = 5
+CONFIG_VERSION = 6
 """配置版本。
 
 - 1 → 2（M2q.4）：`record.min_hold_ms` 默认值 25 → 0（单帧即确认）。
@@ -24,8 +24,11 @@ CONFIG_VERSION = 5
   `AppConfig.backend`，档里出现的 `"dxgi"` 只是 `to_dict()` 序列化出的默认值，不是用户选择；
   不重置的话"改默认"对已有档完全无效（它们会被读回 dxgi）。从 v4 起这个字段才代表真实选择。
 - 4 → 5（M6c）：`ui.key_play_mode` 重置为 `background`（按键演奏默认改后台）。
-  v5 之前这个字段只是 v1.45 引入时的默认值 `foreground` 被序列化，用户还没做过选择；
-  不重置的话"改默认"对已有档无效。从 v5 起它才代表用户点胶囊选过的值。
+  v5 之前这个字段只是 v1.45 引入时的默认值被序列化，用户还没做过选择；
+  不重置的话"改默认"对已有档无效。
+- 5 → 6（v1.51）：**删掉** `ui.key_play_mode` —— 注入通道改由 `assets/instruments.json`
+  的全局参数 `key_play_channel`（int，0=后台/1=前台）决定，不再存 C 盘设置；
+  迁移时把旧键从档里摘掉，避免残留一个"看起来还在生效"的字段。
 """
 
 # 首次启动（没有 `settings.json`）时的窗口状态。取用户实机调好的值，
@@ -106,15 +109,6 @@ class UiConfig:
     才写，换了乐器却没重新标定的话，启动时会被标定档里的旧乐器一把拽回去
     （2026-10-23 用户实机反馈："乐器一直固定在老旧的诗琴"）。空值保留"跟随标定档"的
     旧行为，老档升级后不会丢标定。
-    """
-    key_play_mode: str = "background"
-    """按键演奏的注入通道：`foreground`（SendInput，打进当前激活窗口）/
-    `background`（PostMessage，投给目标窗口、不抢前台）。
-
-    默认**后台**（2026-10-26 用户要求）：不用先切窗口、不用抢焦点，
-    边演奏边操作本程序也不会把字母打进谱面文本框。
-    代价是只对"读窗口消息"的程序有效；走 RawInput/DirectInput 的游戏收不到时，
-    把胶囊点成「前台」即可（选择会记在这里）。
     """
 
 
@@ -366,6 +360,13 @@ def _migrate(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(ui, dict):
             ui["key_play_mode"] = "background"
         data["version"] = CONFIG_VERSION
+    if version < 6:
+        # v1.51：注入通道搬到 assets/instruments.json 的全局参数 key_play_channel（int）。
+        # 这里只做清理 —— 留着旧键的话，改档的人会以为它还在生效（实际已无人读取）。
+        ui = data.get("ui")
+        if isinstance(ui, dict):
+            ui.pop("key_play_mode", None)
+        data["version"] = CONFIG_VERSION
     return data
 
 
@@ -374,7 +375,7 @@ def needs_migration(path: Path | str | None = None) -> bool:
 
     为什么需要它：`load_config()` 的迁移**不写盘**（约定），而 `AppConfig.version`
     读出来就是新版本号 —— UI 光看内存无法判断"文件还是旧的"。不落盘的后果是
-    **每次启动都重迁一遍**：用户手选的字段（theme / backend / key_play_mode）会被
+    **每次启动都重迁一遍**：用户手选的字段（theme / backend）会被
     反复拽回新默认值，表现成"设置根本存不住"（M6c 实测踩到）。
     """
     p = Path(path) if path else config_path()
